@@ -1,13 +1,13 @@
 import math
 import matplotlib.pyplot as plt
 import numpy as np
-
+from base_storage_model import EnergyStorageUnit
 # 设置中文显示
 plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 
-class SuperconductingMagneticEnergyStorage:
+class SuperconductingMagneticEnergyStorage(EnergyStorageUnit):
     """
     超导磁储能 (SMES) 模型 (HESS集成版)
     引入了功率调节系统(PCS)和低温制冷系统模型，适用于HESS的能源管理策略(EMS)调用。
@@ -50,7 +50,7 @@ class SuperconductingMagneticEnergyStorage:
         self.power_history = []
         self.soc_history = []
 
-    def get_state_of_charge(self):
+    def get_soc(self):
         """计算SOC，基于电流的平方比，公式: SOC = (I_curr / I_crit)^2"""
         return (self.current / self.critical_current) ** 2
 
@@ -137,7 +137,7 @@ class SuperconductingMagneticEnergyStorage:
         self.time_history.append(current_time)
         self.current_history.append(self.current)
         self.power_history.append(power)
-        self.soc_history.append(self.get_state_of_charge())
+        self.soc_history.append(self.get_soc())
 
     def plot_performance(self):
         if not self.time_history:
@@ -189,7 +189,7 @@ def simulate_hess_with_smes():
     # 在 t=6s 时有一个反向的充电需求
     power_demand[(time_steps >= 6) & (time_steps < 6.8)] = -300000
 
-    print(f"--- 开始模拟，SMES初始SOC: {smes.get_state_of_charge():.2f} ---")
+    print(f"--- 开始模拟，SMES初始SOC: {smes.get_soc():.2f} ---")
     smes._record_history(0, 0)
 
     # EMS决策循环

@@ -1,13 +1,13 @@
 import math
 import matplotlib.pyplot as plt
 import numpy as np
-
+from base_storage_model import EnergyStorageUnit
 # 设置中文显示
 plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 
-class FlywheelModel:
+class FlywheelModel(EnergyStorageUnit):
     """
     飞轮储能系统模型 (HESS集成版)
     增加了动态可用功率、SOH、成本等接口，适用于混合储能系统能源管理策略(EMS)调用。
@@ -80,7 +80,7 @@ class FlywheelModel:
         initial_max_energy = 0.5 * self.moment_of_inertia * self.initial_max_angular_vel ** 2
         return initial_max_energy * self.state_of_health
 
-    def get_state_of_charge(self):  #SOC状态
+    def get_soc(self):  #SOC状态
         max_energy = self.calculate_max_energy()
         return self.calculate_kinetic_energy() / max_energy if max_energy > 0 else 0
 
@@ -90,7 +90,7 @@ class FlywheelModel:
         EMS查询：获取当前可用的充电功率 (W)
         受限于额定功率和SOC上限
         """
-        soc = self.get_state_of_charge()
+        soc = self.get_soc()
         if soc >= self.soc_upper_limit:
             return 0  # 达到上限，不能再充电
 
@@ -105,7 +105,7 @@ class FlywheelModel:
         EMS查询：获取当前可用的放电功率 (W)
         受限于额定功率和SOC下限
         """
-        soc = self.get_state_of_charge()
+        soc = self.get_soc()
         if soc <= self.soc_lower_limit:
             return 0  # 达到下限，不能再放电
 
@@ -174,7 +174,7 @@ class FlywheelModel:
         self.time_history.append(current_time)
         self.energy_history.append(self.calculate_kinetic_energy())
         self.power_history.append(power)
-        self.soc_history.append(self.get_state_of_charge())
+        self.soc_history.append(self.get_soc())
         self.angular_vel_history.append(self.current_angular_vel)
 
     def plot_performance(self):
@@ -225,7 +225,7 @@ def simulate_hess_with_flywheel():
     power_demand = -20000 * np.sin(time_steps * 0.5) + 30000 * np.cos(time_steps * 0.2)
     power_demand[20:25] = 70000  # 模拟一个突然的高功率放电需求
 
-    print(f"--- 开始模拟，飞轮初始SOC: {flywheel.get_state_of_charge() * 100:.1f}% ---")
+    print(f"--- 开始模拟，飞轮初始SOC: {flywheel.get_soc() * 100:.1f}% ---")
 
     # 记录初始状态
     flywheel._record_history(0, 0)
@@ -242,7 +242,7 @@ def simulate_hess_with_flywheel():
             power_to_dispatch = min(demand, available_power)
             flywheel.discharge(power_to_dispatch, dt)
             print(
-                f"t={time_steps[i + 1]:>2}s: 需求 {demand / 1000:>5.1f}kW, 飞轮放电 {power_to_dispatch / 1000:>5.1f}kW, SOC: {flywheel.get_state_of_charge() * 100:.1f}%")
+                f"t={time_steps[i + 1]:>2}s: 需求 {demand / 1000:>5.1f}kW, 飞轮放电 {power_to_dispatch / 1000:>5.1f}kW, SOC: {flywheel.get_soc() * 100:.1f}%")
 
         elif demand < 0:  # 需要充电
             # 查询飞轮此刻能吸收多少功率
@@ -250,11 +250,11 @@ def simulate_hess_with_flywheel():
             power_to_dispatch = min(abs(demand), available_power)
             flywheel.charge(power_to_dispatch, dt)
             print(
-                f"t={time_steps[i + 1]:>2}s: 需求 {demand / 1000:>5.1f}kW, 飞轮充电 {power_to_dispatch / 1000:>5.1f}kW, SOC: {flywheel.get_state_of_charge() * 100:.1f}%")
+                f"t={time_steps[i + 1]:>2}s: 需求 {demand / 1000:>5.1f}kW, 飞轮充电 {power_to_dispatch / 1000:>5.1f}kW, SOC: {flywheel.get_soc() * 100:.1f}%")
 
         else:  # 无需求，计算自放电损耗
             flywheel.idle_loss(dt)
-            print(f"t={time_steps[i + 1]:>2}s: 需求 0.0kW, 飞轮闲置, SOC: {flywheel.get_state_of_charge() * 100:.1f}%")
+            print(f"t={time_steps[i + 1]:>2}s: 需求 0.0kW, 飞轮闲置, SOC: {flywheel.get_soc() * 100:.1f}%")
 
     flywheel.plot_performance()
 

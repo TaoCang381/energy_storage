@@ -1,13 +1,13 @@
 import math
 import matplotlib.pyplot as plt
 import numpy as np
-
+from base_storage_model import EnergyStorageUnit
 # 设置中文显示
 plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 
-class Supercapacitor:
+class Supercapacitor(EnergyStorageUnit):
     """
     超级电容器模型 (HESS集成版)
     增加了动态可用功率、SOH、SOC等接口，适用于混合储能系统能源管理策略(EMS)调用。
@@ -55,7 +55,7 @@ class Supercapacitor:
         self.power_history = []
         self.soc_history = []
 
-    def get_state_of_charge(self):
+    def get_soc(self):
         """计算SOC，基于能量的定义，公式: SOC = (V_curr^2 - V_min^2) / (V_max^2 - V_min^2)"""
         v_curr_sq = self.current_voltage ** 2
         v_min_sq = self.min_voltage ** 2
@@ -93,6 +93,7 @@ class Supercapacitor:
         return max(0, min(max_power_by_current, max_power_by_voltage))
 
     # --- 充放电与损耗控制方法 (重构) ---
+    #!!!问题存在P大于0和小于0分别表示充电和放电状态，没有区分
     def charge(self, power, time):
         """按指定功率和时间充电"""
         available_power = self.get_available_charge_power()
@@ -144,7 +145,7 @@ class Supercapacitor:
         self.time_history.append(current_time)
         self.voltage_history.append(self.current_voltage)
         self.power_history.append(power)
-        self.soc_history.append(self.get_state_of_charge())
+        self.soc_history.append(self.get_soc())
 
     def plot_performance(self):
         """绘制性能曲线"""
@@ -191,7 +192,7 @@ def simulate_hess_with_supercap():
     # 一个基准功率 + 高频噪声
     power_fluctuation = 20000 * np.sin(time_steps * 50) * np.exp(-0.1 * time_steps)
 
-    print(f"--- 开始模拟，超容初始SOC: {supercap.get_state_of_charge():.2f} ---")
+    print(f"--- 开始模拟，超容初始SOC: {supercap.get_soc():.2f} ---")
     supercap._record_history(0, 0)
 
     # EMS决策循环
