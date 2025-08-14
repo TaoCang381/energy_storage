@@ -1,209 +1,182 @@
+# file: PythonProject/low power density group/caes_system.py
+
 import math
 import matplotlib.pyplot as plt
 import numpy as np
+
+# 解决导入错误的路径问题
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from base_storage_model import EnergyStorageUnit
-# 设置中文显示
-plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']
-plt.rcParams['axes.unicode_minus'] = False
 
 
 class DiabaticCAES(EnergyStorageUnit):
     """
-    补燃式压缩空气储能 (D-CAES) 模型 (HESS集成版)
-    特点：
-    1. 包含压缩机、储气室、燃气轮机三个部分。
-    2. 放电过程消耗化石燃料（天然气），是一个混合动力系统。
-    3. 性能由热耗率和耗气率等关键参数定义。
+    补燃式压缩空气储能 (D-CAES) 模型 (HESS集成版 - 严格对应论文公式)
+    包含压缩机、储气室、燃气轮机三个部分，并考虑燃料消耗。
     """
 
     def __init__(self,
+                 ess_id="diabatic_caes_01",
+                 initial_soc=0.5,
+                 initial_soh=1.0,  # CAES的SOH几乎不衰减
+                 # ========================== 合理化参数配置 (开始) ==========================
                  # --- 储气室 (能量容量) ---
-                 cavern_max_air_mass_kg=5e7,  # 储气室最大空气容量 (kg), e.g., 5万吨
+                 cavern_max_air_mass_kg=5e8,  # 储气室最大空气容量 (kg), e.g., 50万吨
 
                  # --- 压缩机组 (充电) ---
                  compressor_rated_power_w=200e6,  # 压缩机组额定功率 (W), e.g., 200 MW
-                 charge_rate_kg_per_j=1e-4,  # 充电速率 (kg/J): 每消耗1焦耳电能存入的空气质量
+                 charge_rate_kg_per_kwh=0.2,  # 充电效率 (kg/kWh): 每消耗1度电存入的空气质量
 
                  # --- 透平发电机组 (放电) ---
                  turbine_rated_power_w=300e6,  # 透平发电机组额定功率 (W), e.g., 300 MW
-                 heat_rate_j_per_j=1.5,  # 热耗率 (J/J): 每输出1J电能，需要消耗1.5J的燃料热值
-                 air_usage_rate_kg_per_j=5e-5,  # 耗气率 (kg/J): 每输出1J电能，需要消耗5e-5 kg的压缩空气
+                 heat_rate_kj_per_kwh=5000,  # 热耗率 (kJ/kWh): 每发1度电，需要消耗5000kJ的燃料热值
+                 air_usage_rate_kg_per_kwh=1.0,  # 耗气率 (kg/kWh): 每发1度电，需要消耗1.0kg的压缩空气
 
-                 # --- HESS集成 & 其他参数 ---
-                 ess_id="diabatic_caes_01",
-                 initial_soc=0.5,
+                 # --- 运行限制 ---
+                 min_power_ratio=0.25,
                  soc_upper_limit=0.98,
-                 soc_lower_limit=0.2  # 储气室通常保持一定底压
+                 soc_lower_limit=0.2,
+                 # ========================== 合理化参数配置 (结束) ==========================
+                 cost_per_kwh_fuel=0.3  # 每kWh燃料热值的成本（元）
                  ):
 
-        # --- HESS 集成参数 ---
-        self.id = ess_id
-        self.state_of_health = 1.0  # CAES的SOH几乎不衰减
+        super().__init__(ess_id, initial_soc, initial_soh)
+        self.soh = 1.0
 
         # --- 规格参数 ---
-        self.cavern_max_air_mass_kg = cavern_max_air_mass_kg
-        self.compressor_rated_power_w = compressor_rated_power_w
-        self.charge_rate_kg_per_j = charge_rate_kg_per_j
-        self.turbine_rated_power_w = turbine_rated_power_w
-        self.heat_rate_j_per_j = heat_rate_j_per_j
-        self.air_usage_rate_kg_per_j = air_usage_rate_kg_per_j
-        self.soc_upper_limit = soc_upper_limit
-        self.soc_lower_limit = soc_lower_limit
+        self.M_air_max = cavern_max_air_mass_kg
+        self.P_comp_rated = compressor_rated_power_w
+        self.eta_charge_rate = charge_rate_kg_per_kwh
+        self.P_gen_rated = turbine_rated_power_w
+        self.eta_heat_rate = heat_rate_kj_per_kwh
+        self.eta_air_usage = air_usage_rate_kg_per_kwh
+        self.soc_max = soc_upper_limit
+        self.soc_min = soc_lower_limit
+        self.cost_per_kwh_fuel = cost_per_kwh_fuel
 
-        # --- 状态变量 ---
-        self.current_air_mass_kg = self.cavern_max_air_mass_kg * initial_soc
-        self.state = 'idle'
+        self.P_gen_min = self.P_gen_rated * min_power_ratio
+        self.P_comp_min = self.P_comp_rated * min_power_ratio
 
-        # --- 历史记录 ---
-        self.time_history = []
-        self.power_history = []
-        self.soc_history = []
-        self.fuel_consumption_history = []  # 新增：记录燃料消耗
+        # --- 核心状态变量：储气室空气质量 M_air ---
+        self.M_air_kg = self.M_air_max * self.soc
+
+        self.mass_history = []
+        self.fuel_consumption_history_j = []  # 记录消耗的燃料热量
 
     def get_soc(self):
-        """SOC = 当前空气质量 / 最大质量"""
-        return self.current_air_mass_kg / self.cavern_max_air_mass_kg
+        """根据空气质量计算并更新SOC"""
+        if self.M_air_max > 0:
+            self.soc = self.M_air_kg / self.M_air_max
+        else:
+            self.soc = 0
+        return self.soc
 
-    # --- HESS接口核心方法 ---
     def get_available_charge_power(self):
         """获取当前可用的充电(压缩)功率 (W)"""
-        if self.get_soc() >= self.soc_upper_limit:
-            return 0
-        return self.compressor_rated_power_w
+        if self.get_soc() >= self.soc_max: return 0
+        return self.P_comp_rated
 
     def get_available_discharge_power(self):
         """获取当前可用的放电(发电)功率 (W)"""
-        if self.get_soc() <= self.soc_lower_limit:
-            return 0
-        # 同时受限于额定功率和剩余空气量
-        max_power_by_air = self.current_air_mass_kg / self.air_usage_rate_kg_per_j / 3600  # 假设能持续1小时
-        return min(self.turbine_rated_power_w, max_power_by_air)
+        if self.get_soc() <= self.soc_min: return 0
 
-    # --- 充放电与损耗控制方法 ---
+        # 同时受限于额定功率和剩余空气量
+        # 可持续发电时长 (h) = 剩余空气质量 / (额定功率 * 耗气率)
+        duration_h = self.M_air_kg / ((self.P_gen_rated / 1000) * self.eta_air_usage)
+        # 如果持续时长小于一个时间步，则按比例降低可用功率
+        if duration_h < 1.0:  # 假设调度时间步长为1小时
+            max_power_by_air = self.P_gen_rated * duration_h
+            return min(self.P_gen_rated, max_power_by_air)
+
+        return self.P_gen_rated
+
     def charge(self, power_elec, time_s):
         """按指定电功率充电 (压缩)"""
         power_elec = min(power_elec, self.get_available_charge_power())
-        if power_elec <= 0: return
-        self.state = 'charging'
-
-        # 计算存入的空气质量
-        energy_consumed_j = power_elec * time_s
-        mass_stored_kg = energy_consumed_j * self.charge_rate_kg_per_j
-
-        self.current_air_mass_kg += mass_stored_kg
-        self.current_air_mass_kg = min(self.current_air_mass_kg, self.cavern_max_air_mass_kg * self.soc_upper_limit)
-
-        self._record_history(time_s, power_elec, 0)
-
-    def discharge(self, power_elec, time_s):
-        """按指定电功率放电 (发电)，同时计算燃料消耗"""
-        power_elec = min(power_elec, self.get_available_discharge_power())
-        if power_elec <= 0: return
-        self.state = 'discharging'
-
-        energy_generated_j = power_elec * time_s
-
-        # 计算消耗的空气质量
-        mass_consumed_kg = energy_generated_j * self.air_usage_rate_kg_per_j
-
-        # 检查是否有足够的空气
-        if mass_consumed_kg > self.current_air_mass_kg:
-            mass_consumed_kg = self.current_air_mass_kg
-            energy_generated_j = mass_consumed_kg / self.air_usage_rate_kg_per_j
-            power_elec = energy_generated_j / time_s
-
-        self.current_air_mass_kg -= mass_consumed_kg
-
-        # 计算消耗的燃料热量
-        fuel_consumed_j = energy_generated_j * self.heat_rate_j_per_j
-
-        self._record_history(time_s, -power_elec, fuel_consumed_j)
-
-    def idle_loss(self, time_s):
-        """模拟闲置时的洞穴气体泄漏 (非常微小)"""
-        self.state = 'idle'
-        leakage_rate_kg_per_s = 1.0  # 示例值: 1 kg/s
-        self.current_air_mass_kg -= leakage_rate_kg_per_s * time_s
-        self.current_air_mass_kg = max(0, self.current_air_mass_kg)
-        self._record_history(time_s, 0, 0)
-
-    def _record_history(self, time_delta, power, fuel_consumed_j):
-        current_time = self.time_history[-1] + time_delta if self.time_history else time_delta
-        self.time_history.append(current_time)
-        self.power_history.append(power)
-        self.soc_history.append(self.get_soc())
-        self.fuel_consumption_history.append(fuel_consumed_j)
-
-    def plot_performance(self):
-        """绘制性能曲线"""
-        if not self.time_history:
-            print("没有历史数据可供绘图。")
+        if power_elec < self.P_comp_min:
+            self.idle_loss(time_s)
             return
 
-        fig, axes = plt.subplots(3, 1, figsize=(12, 16), sharex=True)
-        fig.suptitle(f'补燃式CAES ({self.id}) 性能曲线', fontsize=16)
+        self.state = 'charging'
 
-        time_h = [t / 3600.0 for t in self.time_history]
-        power_mw = [p / 1e6 for p in self.power_history]
-        fuel_power_mw = [
-            (f / (time_h[i + 1] - time_h[i]) / 3600 if (i + 1 < len(time_h) and time_h[i + 1] > time_h[i]) else 0) / 1e6
-            for i, f in enumerate(self.fuel_consumption_history)]
+        # 1. 计算存入的空气质量 (动态方程)
+        energy_consumed_kwh = (power_elec * time_s) / 3.6e6
+        mass_stored_kg = energy_consumed_kwh * self.eta_charge_rate
+        self.M_air_kg += mass_stored_kg
 
-        axes[0].plot(time_h, self.soc_history, 'm-', lw=2, label='SOC (储气量)')
-        axes[0].set_title('荷电状态 (SOC) 变化');
-        axes[0].set_ylabel('SOC');
-        axes[0].grid(True);
-        axes[0].legend()
+        # 2. 应用储气室容量约束
+        self.M_air_kg = min(self.M_air_kg, self.M_air_max * self.soc_max)
 
-        axes[1].plot(time_h, power_mw, 'g-', lw=2, label='净输出电功率')
-        axes[1].set_title('电功率变化');
-        axes[1].set_ylabel('功率 (MW)');
-        axes[1].grid(True);
-        axes[1].legend()
+        self._record_history_caes(time_s, power_elec, 0)
 
-        axes[2].plot(time_h, fuel_power_mw, 'r-', lw=2, label='燃料消耗功率')
-        axes[2].set_title('燃料消耗功率变化');
-        axes[2].set_ylabel('功率 (MW_th)');
-        axes[2].grid(True);
-        axes[2].legend()
-        axes[2].set_xlabel('时间 (小时)')
+    def discharge(self, power_elec, time_s):
+        """按指定电功率放电 (发电)，并计算燃料消耗"""
+        power_elec = min(power_elec, self.get_available_discharge_power())
+        if power_elec < self.P_gen_min:
+            self.idle_loss(time_s)
+            return
 
-        plt.tight_layout(rect=[0, 0, 1, 0.96]);
-        plt.show()
+        self.state = 'discharging'
+
+        energy_generated_kwh = (power_elec * time_s) / 3.6e6
+
+        # 1. 计算消耗的空气质量 (动态方程)
+        mass_consumed_kg = energy_generated_kwh * self.eta_air_usage
+        self.M_air_kg -= mass_consumed_kg
+
+        # 2. 应用储气室容量约束
+        self.M_air_kg = max(self.M_air_kg, self.M_air_max * self.soc_min)
+
+        # 3. 计算消耗的燃料热量
+        fuel_consumed_kj = energy_generated_kwh * self.eta_heat_rate
+        fuel_consumed_j = fuel_consumed_kj * 1000
+
+        self._record_history_caes(time_s, -power_elec, fuel_consumed_j)
+        return power_elec, fuel_consumed_j
+
+    def idle_loss(self, time_s):
+        """模拟闲置时的洞穴气体泄漏"""
+        self.state = 'idle'
+        # 简化模型，忽略微小的泄漏
+        self._record_history_caes(time_s, 0, 0)
+
+    def _record_history_caes(self, time_delta, power, fuel_consumed_j):
+        """记录CAES特有的历史数据"""
+        current_soc = self.get_soc()
+        super()._record_history(time_delta, power, current_soc)
+        self.mass_history.append(self.M_air_kg)
+        self.fuel_consumption_history_j.append(fuel_consumed_j)
 
 
-def simulate_hess_with_caes():
-    """一个简化的示例，演示CAES用于电网大规模调峰"""
+# --- 单元测试用的示例函数 ---
+def simulate_caes_test():
     caes = DiabaticCAES(initial_soc=0.5)
 
-    # 模拟一周的电网负荷
-    time_steps_h = np.arange(0, 24 * 7, 1)
+    print(f"CAES Initialized. Comp Power: {caes.P_comp_rated / 1e6} MW, Gen Power: {caes.P_gen_rated / 1e6} MW")
+    print(f"Max Air Mass: {caes.M_air_max / 1000} tons")
+    print(f"Initial SOC: {caes.get_soc():.3f}\n")
 
-    # 典型负荷曲线，夜间低谷，白天双高峰
-    load = 150e6 - 100e6 * np.cos(time_steps_h * np.pi / 12) + 50e6 * np.sin(time_steps_h * np.pi / 6)
+    # 模拟以200MW功率连续压缩空气10小时
+    charge_power = 200e6
+    charge_time = 10 * 3600
+    print(f"--- Charging with {charge_power / 1e6} MW for {charge_time / 3600:.1f}h ---")
+    caes.charge(charge_power, charge_time)
+    print(f"After charging, SOC: {caes.get_soc():.3f}, Air Mass: {caes.M_air_kg / 1000:.2f} tons\n")
 
-    print(f"--- 开始模拟，CAES初始SOC: {caes.get_soc():.2f} ---")
-    caes._record_history(0, 0, 0)
-
-    # EMS决策循环：简单的阈值控制，低谷充电，高峰放电
-    for i in range(len(time_steps_h) - 1):
-        dt_s = (time_steps_h[i + 1] - time_steps_h[i]) * 3600
-        current_load = load[i]
-
-        # 负荷低于100MW时，认为是低谷，全力充电
-        if current_load < 100e6:
-            power = caes.get_available_charge_power()
-            caes.charge(power, dt_s)
-        # 负荷高于250MW时，认为是高峰，全力放电
-        elif current_load > 250e6:
-            power = caes.get_available_discharge_power()
-            caes.discharge(power, dt_s)
-        else:
-            caes.idle_loss(dt_s)
-
-    print("--- 模拟结束 ---")
-    caes.plot_performance()
+    # 模拟以300MW电功率连续发电5小时
+    discharge_power = 300e6
+    discharge_time = 5 * 3600
+    print(f"--- Discharging with {discharge_power / 1e6} MW_e for {discharge_time / 3600:.1f}h ---")
+    actual_p_elec, fuel_j = caes.discharge(discharge_power, discharge_time)
+    fuel_gwh = fuel_j / 3.6e12
+    print(f"After discharging, SOC: {caes.get_soc():.3f}, Air Mass: {caes.M_air_kg / 1000:.2f} tons")
+    print(
+        f"  > Generated Elec: {actual_p_elec / 1e6 * (discharge_time / 3600):.2f} MWh, Consumed Fuel (thermal): {fuel_gwh * 1000:.2f} MWh_th\n")
 
 
 if __name__ == "__main__":
-    simulate_hess_with_caes()
+    simulate_caes_test()

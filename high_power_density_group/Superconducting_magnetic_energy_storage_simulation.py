@@ -1,217 +1,180 @@
+# file: PythonProject/high_power_density_group/Superconducting_magnetic_energy_storage_simulation.py
+
 import math
 import matplotlib.pyplot as plt
 import numpy as np
+
+# 解决导入错误的路径问题
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from base_storage_model import EnergyStorageUnit
-# 设置中文显示
-plt.rcParams['font.sans-serif'] = ['SimHei']
-plt.rcParams['axes.unicode_minus'] = False
 
 
 class SuperconductingMagneticEnergyStorage(EnergyStorageUnit):
     """
-    超导磁储能 (SMES) 模型 (HESS集成版)
-    引入了功率调节系统(PCS)和低温制冷系统模型，适用于HESS的能源管理策略(EMS)调用。
+    超导磁储能 (SMES) 模型 (物理升级版 - 严格对应论文公式)
+    模型基于电磁感应定律，核心状态为线圈电流，并包含制冷系统损耗。
     """
 
     def __init__(self,
-                 # --- 核心物理参数 ---
-                 inductance=100,  # 电感 (H)
-                 critical_current=1000,  # 临界电流 (A)
+                 ess_id="smes_01",
+                 initial_soc=0.5,
+                 initial_soh=1.0,
+                 # ========================== 合理化参数配置 (开始) ==========================
+                 # --- 核心物理参数 (配置为 5MW / 5MJ 系统) ---
+                 inductance_H=2.5,  # 电感 (H, 亨利)
+                 max_current_A=2000.0,  # 最大/临界电流 (A)
+                 min_current_A=200.0,  # 最小工作电流 (A), 避免奇异性
 
                  # --- PCS 和制冷系统参数 ---
-                 pcs_rated_power=100000,  # PCS额定功率 (W)，SMES功率非常大
+                 pcs_rated_power_w=5e6,  # PCS额定功率 (W), e.g., 5 MW
                  pcs_efficiency=0.97,  # PCS转换效率
-                 cryogenic_power=5000,  # 低温系统维持功率 (W)，固有损耗
+                 cryogenic_power_w=50000,  # 低温系统维持功率 (W), e.g., 50 kW (恒定损耗)
+                 pcs_max_voltage_v=3000,  # PCS最大输出电压 (V)
+                 # ========================== 合理化参数配置 (结束) ==========================
 
-                 # --- HESS集成新增参数 ---
-                 ess_id="smes_01",
-                 initial_soc=0.0):
+                 cost_per_kwh=0.02  # 运行成本主要为电费
+                 ):
 
-        # --- HESS 集成参数 ---
-        self.id = ess_id
+        super().__init__(ess_id, initial_soc, initial_soh)
 
-        # --- 核心物理参数 ---
-        self.inductance = inductance
-        self.critical_current = critical_current
+        # --- 物理与性能参数 ---
+        self.L_smes = inductance_H
+        self.I_max = max_current_A
+        self.I_min = min_current_A
+        self.P_pcs_rated = pcs_rated_power_w
+        self.eta_pcs = pcs_efficiency  # 假设充放电效率相同
+        self.P_cryo = cryogenic_power_w
+        self.V_pcs_max = pcs_max_voltage_v
+        self.cost_per_kwh = cost_per_kwh
 
-        # --- PCS 和制冷系统 ---
-        self.pcs_rated_power = pcs_rated_power
-        self.pcs_efficiency = pcs_efficiency
-        self.cryogenic_power = cryogenic_power
+        # --- 核心状态变量：线圈电流 I_smes ---
+        # SOC_E = (E - E_min) / (E_max - E_min) = (I^2 - I_min^2) / (I_max^2 - I_min^2)
+        i_range_sq = self.I_max ** 2 - self.I_min ** 2
+        self.I_smes = math.sqrt(self.soc * i_range_sq + self.I_min ** 2)
 
-        # --- 状态变量 ---
-        # SOC = (I / I_crit)^2 => I = I_crit * sqrt(SOC)
-        self.current = self.critical_current * math.sqrt(initial_soc)
-        self.state = 'idle'  # 'idle', 'charging', 'discharging'
-
-        # --- 历史记录 ---
-        self.time_history = []
         self.current_history = []
-        self.power_history = []
-        self.soc_history = []
 
     def get_soc(self):
-        """计算SOC，基于电流的平方比，公式: SOC = (I_curr / I_crit)^2"""
-        return (self.current / self.critical_current) ** 2
+        """根据线圈电流计算并更新SOC (基于能量)"""
+        i_range_sq = self.I_max ** 2 - self.I_min ** 2
+        if i_range_sq <= 0: return 0
+        self.soc = (self.I_smes ** 2 - self.I_min ** 2) / i_range_sq
+        return self.soc
 
-    def calculate_energy(self):
-        """计算当前储能, E = 0.5 * L * I^2"""
-        return 0.5 * self.inductance * self.current ** 2
+    def _get_pcs_voltage(self, power_elec_net, is_charging):
+        """根据净电功率指令计算PCS施加的电压"""
+        # 防止除以零
+        current_I = self.I_smes if self.I_smes > 1e-3 else 1e-3
 
-    # --- HESS接口核心方法 ---
+        if is_charging:
+            # V_pcs = (P_elec * eta) / I
+            voltage = (power_elec_net * self.eta_pcs) / current_I
+        else:
+            # V_pcs = - P_elec / (I * eta)
+            voltage = - (power_elec_net / (current_I * self.eta_pcs))
+
+        # 应用电压约束
+        return max(-self.V_pcs_max, min(self.V_pcs_max, voltage))
+
+    def _update_current(self, V_pcs, time_s):
+        """根据PCS电压更新线圈电流"""
+        # dI = (V / L) * dt
+        self.I_smes += (V_pcs / self.L_smes) * time_s
+        # 应用电流约束
+        self.I_smes = max(self.I_min, min(self.I_smes, self.I_max))
+
     def get_available_charge_power(self):
-        """EMS查询：获取当前可用的充电功率 (W)，主要受限于PCS功率"""
-        # 如果电流已达临界值，则不能再充电
-        if self.current >= self.critical_current:
-            return 0
-        return self.pcs_rated_power
+        """获取当前可用的充电功率 (W)"""
+        if self.I_smes >= self.I_max: return 0
+        return self.P_pcs_rated
 
     def get_available_discharge_power(self):
-        """EMS查询：获取当前可用的放电功率 (W)，主要受限于PCS功率"""
-        # 如果电流为0，则不能再放电
-        if self.current <= 0:
-            return 0
-        return self.pcs_rated_power
+        """获取当前可用的放电功率 (W)"""
+        if self.I_smes <= self.I_min: return 0
+        return self.P_pcs_rated
 
-    # --- 充放电与损耗控制方法 (重构) ---
-    def charge(self, power, time):
-        """
-        按指定功率和时间充电 (功率指从电网吸收的功率)
-        """
-        available_power = self.get_available_charge_power()
-        power = min(power, available_power)
-        if power <= 0: return
-
+    def charge(self, power_elec, time_s):
+        """按指定电功率充电 (制冷功耗由EMS在系统层面考虑)"""
+        power_elec_net = min(power_elec, self.get_available_charge_power())
+        if power_elec_net <= 0: return
         self.state = 'charging'
-        # 实际注入到线圈的功率需考虑PCS效率
-        power_to_coil = power * self.pcs_efficiency
 
-        # P = V*I = (L*dI/dt)*I => dI/dt = P / (L*I)
-        # 为避免I=0时奇异，在电流很小时，我们假设PCS以恒定dI/dt启动
-        if self.current < 1e-3 * self.critical_current:
-            # 简化处理：以额定功率的1%对应的dI/dt启动
-            delta_i = (self.pcs_rated_power * 0.01 / (self.inductance * self.critical_current)) * time
-        else:
-            di_dt = power_to_coil / (self.inductance * self.current)
-            delta_i = di_dt * time
+        V_pcs = self._get_pcs_voltage(power_elec_net, is_charging=True)
+        self._update_current(V_pcs, time_s)
 
-        self.current += delta_i
-        self.current = min(self.current, self.critical_current)
-        self._record_history(time, power)
+        # 记录的功率是PCS的净功率
+        self._record_history_smes(time_s, power_elec_net)
 
-    def discharge(self, power, time):
-        """
-        按指定功率和时间放电 (功率指注入到电网的功率)
-        """
-        available_power = self.get_available_discharge_power()
-        power = min(power, available_power)
-        if power <= 0: return
-
+    def discharge(self, power_elec, time_s):
+        """按指定电功率放电 (制冷功耗由EMS在系统层面考虑)"""
+        power_elec_net = min(power_elec, self.get_available_discharge_power())
+        if power_elec_net <= 0: return
         self.state = 'discharging'
-        # 从线圈提取的功率需考虑PCS效率
-        power_from_coil = power / self.pcs_efficiency
 
-        if self.current <= 0: return
+        V_pcs = self._get_pcs_voltage(power_elec_net, is_charging=False)
+        self._update_current(V_pcs, time_s)
 
-        di_dt = power_from_coil / (self.inductance * self.current)
-        delta_i = di_dt * time
+        self._record_history_smes(time_s, -power_elec_net)
 
-        self.current -= delta_i
-        self.current = max(0, self.current)
-        self._record_history(time, -power)
-
-    def apply_cryogenic_load(self, time):
-        """
-        在HESS层面，此方法用于让EMS知晓SMES的持续寄生损耗。
-        在模型内部，我们仅记录状态和时间。
-        注意：这个功率损耗是持续的，无论充放电还是闲置。
-        """
+    def idle_loss(self, time_s):
+        """闲置时，线圈电流无损耗，但系统仍有制冷功耗"""
         self.state = 'idle'
-        # SMES的电流在超导状态下几乎无损耗，因此不像其他储能有自放电。
-        # 这里仅记录状态，真正的能量消耗是cryogenic_power，由EMS在系统层面核算。
-        self._record_history(time, 0)  # 线圈本身功率交换为0
+        # 理想超导体，电流不变，V_pcs = 0
+        self._update_current(0, time_s)
+        self._record_history_smes(time_s, 0)
 
-    def _record_history(self, time_delta, power):
-        """记录历史数据"""
-        current_time = self.time_history[-1] + time_delta if self.time_history else time_delta
-        self.time_history.append(current_time)
-        self.current_history.append(self.current)
-        self.power_history.append(power)
-        self.soc_history.append(self.get_soc())
+    def get_total_power(self, net_power):
+        """供EMS调用，计算包含制冷损耗的总功率"""
+        # 充电时，总功率 = PCS功率 + 制冷功率
+        # 放电时，总功率 = PCS功率 - 制冷功率 (负数)
+        return net_power + self.P_cryo if net_power >= 0 else net_power - self.P_cryo
 
-    def plot_performance(self):
-        if not self.time_history:
-            print("没有历史数据可供绘图。")
-            return
-
-        fig, axes = plt.subplots(3, 1, figsize=(12, 15), sharex=True)
-        fig.suptitle(f'SMES ({self.id}) 性能曲线', fontsize=16)
-
-        axes[0].plot(self.time_history, self.soc_history, 'm-', lw=2, label='SOC')
-        axes[0].set_title('荷电状态 (SOC) 变化');
-        axes[0].set_ylabel('SOC');
-        axes[0].grid(True);
-        axes[0].legend()
-        axes[0].set_ylim(-0.05, 1.05)
-
-        axes[1].plot(self.time_history, self.current_history, 'c-', lw=2, label='电流')
-        axes[1].axhline(self.critical_current, color='r', ls='--', label='临界电流')
-        axes[1].set_title('线圈电流变化');
-        axes[1].set_ylabel('电流 (A)');
-        axes[1].grid(True);
-        axes[1].legend()
-
-        # 绘制净功率曲线，包含制冷损耗
-        net_power = np.array(self.power_history) - self.cryogenic_power
-        axes[2].plot(self.time_history, [p / 1000 for p in net_power], 'g-', lw=2, label='净输出功率')
-        axes[2].axhline(-self.cryogenic_power / 1000, color='grey', ls=':',
-                        label=f'制冷损耗 ({-self.cryogenic_power / 1000} kW)')
-        axes[2].set_title('净功率变化 (包含制冷损耗)');
-        axes[2].set_ylabel('功率 (kW)');
-        axes[2].grid(True);
-        axes[2].legend()
-        axes[2].set_xlabel('时间 (s)')
-
-        plt.tight_layout(rect=[0, 0, 1, 0.96]);
-        plt.show()
+    def _record_history_smes(self, time_delta, power_net):
+        """记录SMES特有的历史数据"""
+        current_soc = self.get_soc()
+        # 总功率 = 净功率 + 制冷功率
+        total_power = self.get_total_power(power_net)
+        # 调用父类方法记录总功率和SOC
+        super()._record_history(time_delta, total_power, current_soc)
+        # 记录自身特有历史
+        self.current_history.append(self.I_smes)
 
 
-# --- HESS中的EMS调用示例 ---
-def simulate_hess_with_smes():
-    """一个简化的示例，演示EMS如何与SMES模型交互，用于暂态功率支撑"""
-    smes = SuperconductingMagneticEnergyStorage(initial_soc=0.5, pcs_rated_power=500000)
+# --- 单元测试用的示例函数 (使用合理化参数) ---
+def simulate_smes_test():
+    smes = SuperconductingMagneticEnergyStorage(initial_soc=0.5)
 
-    # 模拟一个突然的、短暂的大功率缺口 (e.g., 大型电机启动)
-    time_steps = np.arange(0, 10, 0.05)  # 10秒，每50ms一个决策点
-    power_demand = np.zeros_like(time_steps)
-    # 在 t=2s 时出现一个持续0.5秒的400kW功率缺口
-    power_demand[(time_steps >= 2) & (time_steps < 2.5)] = 400000
-    # 在 t=6s 时有一个反向的充电需求
-    power_demand[(time_steps >= 6) & (time_steps < 6.8)] = -300000
+    max_energy_mj = 0.5 * smes.L_smes * smes.I_max ** 2 / 1e6
+    print(f"SMES Initialized. Max Energy: {max_energy_mj:.2f} MJ")
+    print(f"Initial SOC: {smes.get_soc():.3f}, Initial Current: {smes.I_smes:.2f} A\n")
 
-    print(f"--- 开始模拟，SMES初始SOC: {smes.get_soc():.2f} ---")
-    smes._record_history(0, 0)
+    charge_power = 4e6  # 4 MW
+    charge_time = 0.5  # 0.5 s
+    print(f"--- Charging with {charge_power / 1e6} MW for {charge_time}s ---")
+    smes.charge(charge_power, charge_time)
+    print(f"After charging, SOC: {smes.get_soc():.3f}, Current: {smes.I_smes:.2f} A")
+    total_power = smes.get_total_power(charge_power)
+    print(f"Net power: {charge_power / 1e6:.3f} MW, Total power (with cryo): {total_power / 1e6:.3f} MW\n")
 
-    # EMS决策循环
-    for i in range(len(time_steps) - 1):
-        dt = time_steps[i + 1] - time_steps[i]
-        demand = power_demand[i]
+    idle_time = 1.0  # 1 s
+    print(f"--- Idling for {idle_time}s ---")
+    smes.idle_loss(idle_time)
+    print(f"After idling, SOC: {smes.get_soc():.3f}, Current: {smes.I_smes:.2f} A")
+    total_power = smes.get_total_power(0)
+    print(f"Net power: 0.000 MW, Total power (with cryo): {total_power / 1e6:.3f} MW\n")
 
-        if demand > 0:  # 需要放电
-            available_power = smes.get_available_discharge_power()
-            power_to_dispatch = min(demand, available_power)
-            smes.discharge(power_to_dispatch, dt)
-        elif demand < 0:  # 需要充电
-            available_power = smes.get_available_charge_power()
-            power_to_dispatch = min(abs(demand), available_power)
-            smes.charge(power_to_dispatch, dt)
-        else:  # 闲置
-            smes.apply_cryogenic_load(dt)
-
-    print("--- 模拟结束 ---")
-    # 注意：绘图时会显示净功率，即从电网看，即使闲置SMES也是一个负荷。
-    smes.plot_performance()
+    discharge_power = 5e6  # 5 MW
+    discharge_time = 0.4  # 0.4 s
+    print(f"--- Discharging with {discharge_power / 1e6} MW for {discharge_time}s ---")
+    smes.discharge(discharge_power, discharge_time)
+    print(f"After discharging, SOC: {smes.get_soc():.3f}, Current: {smes.I_smes:.2f} A")
+    total_power = smes.get_total_power(-discharge_power)
+    print(f"Net power: {-discharge_power / 1e6:.3f} MW, Total power (with cryo): {total_power / 1e6:.3f} MW\n")
 
 
 if __name__ == "__main__":
-    simulate_hess_with_smes()
+    simulate_smes_test()
