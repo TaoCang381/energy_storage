@@ -52,6 +52,7 @@ class DiabaticCAES(EnergyStorageUnit):
         self.P_comp_rated = compressor_rated_power_w
         self.eta_charge_rate = charge_rate_kg_per_kwh
         self.P_gen_rated = turbine_rated_power_w
+        self.rated_power_w = self.P_gen_rated
         self.eta_heat_rate = heat_rate_kj_per_kwh
         self.eta_air_usage = air_usage_rate_kg_per_kwh
         self.soc_max = soc_upper_limit

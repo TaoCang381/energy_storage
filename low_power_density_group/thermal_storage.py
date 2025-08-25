@@ -57,6 +57,7 @@ class ThermalEnergyStorage(EnergyStorageUnit):
         self.T_min = min_temp_k
         self.P_heater_rated = heater_rated_power_w
         self.P_gen_rated = heat_engine_rated_power_w
+        self.rated_power_w = self.P_gen_rated
         self.eta_e2h = elec_to_heat_efficiency
         self.eta_h2e = heat_to_elec_efficiency
         self.theta_loss = (heat_loss_rate_percent_hr / 100) / 3600.0  # 转换为每秒损失率

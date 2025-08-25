@@ -45,7 +45,7 @@ class HydrogenStorage(EnergyStorageUnit):
                  soc_upper_limit=0.95,
                  soc_lower_limit=0.05,
                  # ========================== 合理化参数配置 (结束) ==========================
-                 cost_per_kwh_cycle=0.001  # 寿命成本主要体现在启停和运行时长
+                 cost_per_kwh=0.001  # 寿命成本主要体现在启停和运行时长
                  ):
 
         super().__init__(ess_id, initial_soc, initial_soh)
@@ -56,11 +56,12 @@ class HydrogenStorage(EnergyStorageUnit):
         self.M_tank_max = tank_max_capacity_kg
         self.compressor_ratio = compressor_power_ratio
         self.P_fc_rated = fuel_cell_rated_power_w
+        self.rated_power_w = self.P_fc_rated
         self.eta_fc_elec = fc_elec_efficiency
         self.eta_fc_heat = fc_heat_recovery_efficiency
         self.soc_max = soc_upper_limit
         self.soc_min = soc_lower_limit
-        self.cost_per_kwh_cycle = cost_per_kwh_cycle
+        self.cost_per_kwh = cost_per_kwh
 
         # --- 实时工作参数 (受SOH影响) ---
         self.current_fc_efficiency = self.eta_fc_elec * self.soh

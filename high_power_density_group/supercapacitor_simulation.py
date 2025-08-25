@@ -43,13 +43,14 @@ class Supercapacitor(EnergyStorageUnit):
                  ):
 
         super().__init__(ess_id, initial_soc, initial_soh)
-
+        self.soc_min = 0.0
+        self.soc_max = 1.0
         # --- 物理与性能参数 ---
         self.C_sc = capacitance_F * self.soh
         self.V_max = max_voltage
         self.V_min = min_voltage
         self.R_esr = esr_ohm / self.soh
-        self.rated_power_elec = rated_power
+        self.rated_power_w = rated_power
         self.rated_current_sc = rated_current
         self.sigma = self_discharge_rate_sigma
         self.cost_per_kwh = cost_per_kwh
@@ -71,7 +72,7 @@ class Supercapacitor(EnergyStorageUnit):
         """获取当前可用的充电功率 (W)，依据Word文档约束"""
         if self.V_sc >= self.V_max: return 0
 
-        power_limit_by_p = self.rated_power_elec
+        power_limit_by_p = self.rated_power_w
         power_limit_by_i = self.V_sc * self.rated_current_sc + self.rated_current_sc ** 2 * self.R_esr
 
         return min(power_limit_by_p, power_limit_by_i)
@@ -80,7 +81,7 @@ class Supercapacitor(EnergyStorageUnit):
         """获取当前可用的放电功率 (W)，依据Word文档约束"""
         if self.V_sc <= self.V_min: return 0
 
-        power_limit_by_p = self.rated_power_elec
+        power_limit_by_p = self.rated_power_w
         power_limit_by_i = self.V_sc * self.rated_current_sc - self.rated_current_sc ** 2 * self.R_esr
 
         return min(power_limit_by_p, power_limit_by_i)

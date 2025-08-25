@@ -35,11 +35,12 @@ class FlywheelModel(EnergyStorageUnit):
                  ):
 
         super().__init__(ess_id, initial_soc, initial_soh)
-
+        self.soc_min = 0.0
+        self.soc_max = 1.0
         self.J = moment_of_inertia_J
         self.omega_max = max_angular_vel
         self.omega_min = min_angular_vel
-        self.rated_power_elec = rated_power
+        self.rated_power_w = rated_power
         self.rated_torque_mg = rated_torque
         self.eta_ch = charge_efficiency
         self.eta_dis = discharge_efficiency
@@ -107,14 +108,14 @@ class FlywheelModel(EnergyStorageUnit):
     def get_available_charge_power(self):
         if self.omega >= self.omega_max:
             return 0
-        power_limit_by_rated_p = self.rated_power_elec
+        power_limit_by_rated_p = self.rated_power_w
         power_limit_by_rated_t = (self.rated_torque_mg * self.omega) / self.eta_ch
         return min(power_limit_by_rated_p, power_limit_by_rated_t)
 
     def get_available_discharge_power(self):
         if self.omega <= self.omega_min:
             return 0
-        power_limit_by_rated_p = self.rated_power_elec
+        power_limit_by_rated_p = self.rated_power_w
         power_limit_by_rated_t = (self.rated_torque_mg * self.omega) * self.eta_dis
         return min(power_limit_by_rated_p, power_limit_by_rated_t)
 

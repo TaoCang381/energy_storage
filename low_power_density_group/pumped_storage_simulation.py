@@ -61,7 +61,7 @@ class PumpedHydroStorage(EnergyStorageUnit):
 
         self.P_gen_min = self.P_gen_rated * min_power_ratio
         self.P_pump_min = self.P_pump_rated * min_power_ratio
-
+        self.rated_power_w = self.P_gen_rated
         # --- 核心状态变量：上水库水量 V_ur ---
         self.V_ur_m3 = self.V_ur_max * self.soc
 

@@ -11,18 +11,9 @@ class HierarchicalEMS:
     def __init__(self, hess_system):
         self.hess = hess_system
 
-
     def decompose_signal(self, total_fluctuation_series, current_index, short_window_size=5):
         """
         使用滑动平均滤波对波动信号进行分解。
-
-        Args:
-            total_fluctuation_series (np.array): 完整的总波动时间序列。
-            current_index (int): 当前时间点在序列中的索引。
-            short_window_size (int): 用于平滑高频噪声的窗口大小（秒）。
-
-        Returns:
-            tuple: (p_for_fast_group, p_for_medium_group)
         """
         # 建立一个短期的历史窗口
         start_index = max(0, current_index - short_window_size)
@@ -36,9 +27,9 @@ class HierarchicalEMS:
 
         return p_high_freq, p_medium_freq
 
-    def dispatch_power_to_group(self, group_name, power_demand, dt_s):
+    def distribute_power_to_group(self, group_name, power_demand, dt_s):
         """
-        按比例将功率需求分配给一个组内的所有单元。
+        按可用功率和SOC健康度，将功率需求分配给一个组内的所有单元。
         """
         group_units = []
         if group_name == 'fast':
@@ -48,22 +39,24 @@ class HierarchicalEMS:
 
         if not group_units: return 0
 
-        # 根据可用功率按比例分配
         is_charging = power_demand < 0
-        total_available = 0
-        available_powers = {}
+        total_weight = 0
+        unit_weights = {}
 
         for unit in group_units:
-            avail = unit.get_available_charge_power() if is_charging else unit.get_available_discharge_power()
-            available_powers[unit.id] = avail
-            total_available += avail
+            soc = unit.get_soc()
+            soc_health_factor = 1 - abs(soc - 0.5) / 0.5
+            avail_power = unit.get_available_charge_power() if is_charging else unit.get_available_discharge_power()
+            weight = avail_power * soc_health_factor
+            unit_weights[unit.id] = weight
+            total_weight += weight
 
-        if total_available < 1e-3: return 0
+        if total_weight < 1e-3: return 0
 
         actual_dispatch_total = 0
         for unit in group_units:
-            ratio = available_powers[unit.id] / total_available
-            power_to_dispatch = min(abs(power_demand) * ratio, available_powers[unit.id])
+            ratio = unit_weights[unit.id] / total_weight if total_weight > 0 else 0
+            power_to_dispatch = abs(power_demand) * ratio
 
             if is_charging:
                 unit.charge(power_to_dispatch, dt_s)

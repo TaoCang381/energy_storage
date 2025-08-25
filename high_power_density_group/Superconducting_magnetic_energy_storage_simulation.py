@@ -40,12 +40,13 @@ class SuperconductingMagneticEnergyStorage(EnergyStorageUnit):
                  ):
 
         super().__init__(ess_id, initial_soc, initial_soh)
-
+        self.soc_min = 0.0
+        self.soc_max = 1.0
         # --- 物理与性能参数 ---
         self.L_smes = inductance_H
         self.I_max = max_current_A
         self.I_min = min_current_A
-        self.P_pcs_rated = pcs_rated_power_w
+        self.rated_power_w = pcs_rated_power_w
         self.eta_pcs = pcs_efficiency  # 假设充放电效率相同
         self.P_cryo = cryogenic_power_w
         self.V_pcs_max = pcs_max_voltage_v
@@ -90,12 +91,12 @@ class SuperconductingMagneticEnergyStorage(EnergyStorageUnit):
     def get_available_charge_power(self):
         """获取当前可用的充电功率 (W)"""
         if self.I_smes >= self.I_max: return 0
-        return self.P_pcs_rated
+        return self.rated_power_w
 
     def get_available_discharge_power(self):
         """获取当前可用的放电功率 (W)"""
         if self.I_smes <= self.I_min: return 0
-        return self.P_pcs_rated
+        return self.rated_power_w
 
     def charge(self, power_elec, time_s):
         """按指定电功率充电 (制冷功耗由EMS在系统层面考虑)"""

@@ -47,7 +47,7 @@ class ElectrochemicalEnergyStorage(EnergyStorageUnit):
                  },
                  # ========================== 合理化参数配置 (结束) ==========================
 
-                 cost_per_kwh_cycle=0.0002  # 每循环一度电的等效寿命成本
+                 cost_per_kwh=0.0002  # 每循环一度电的等效寿命成本
                  ):
 
         super().__init__(ess_id, initial_soc, initial_soh)
@@ -61,7 +61,7 @@ class ElectrochemicalEnergyStorage(EnergyStorageUnit):
         self.soc_min = soc_lower_limit
         self.ocv_params = ocv_params
         self.cycle_life_model = cycle_life_model
-        self.cost_per_kwh_cycle = cost_per_kwh_cycle
+        self.cost_per_kwh = cost_per_kwh
 
         # --- 实时工作参数 (受SOH影响) ---
         self.capacity_kwh = self.nominal_capacity_kwh * self.soh
