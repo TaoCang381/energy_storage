@@ -9,8 +9,7 @@ class EnergyStorageUnit:
 
     # ========================== 错误修正区 (开始) ==========================
     # 升级__init__方法，使其可以接收所有储能共有的初始状态参数
-    def __init__(self, ess_id, initial_soc=0.5, initial_soh=1.0):
-        # ========================== 错误修正区 (结束) ==========================
+    def __init__(self, ess_id, initial_soc=0.5, initial_soh=1.0):# ========================== 错误修正区 (结束) ==========================
         self.id = ess_id
         self.state = 'idle'
         self.soc = initial_soc  # 使用统一的soc属性

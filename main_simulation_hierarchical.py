@@ -1,12 +1,13 @@
-# file: main_simulation_hierarchical.py (V2.1 - 最终完整健壮版)
+# 文件: main_simulation_hierarchical.py (V2.3 - 最终防错健壮版)
 # 备注：这是一个完整的、可直接运行的版本，修复了所有已知的变量定义和逻辑衔接问题。
+#       增加了边界检查，防止仿真末尾出现索引越界错误。
 #       集成了小波包变换(WPT)对净负荷进行功能解耦，为分层MPC提供清晰的任务信号。
 #       更新了绘图部分以更好地可视化新框架的运行结果。
 
 import numpy as np
 import matplotlib.pyplot as plt
-import pywt  # 导入小波包变换库
-import pandas as pd  # 导入pandas用于数据处理
+import pywt
+import pandas as pd
 
 from hess_system import HybridEnergyStorageSystem
 from mpc_ems_hierarchical import HierarchicalMPCEms
@@ -78,14 +79,10 @@ def decompose_power_signal(power_signal, wavelet='db4', level=3):
 # =============================================================================
 def generate_wind_power_data(duration_s, dt_s):
     time_series = np.arange(0, duration_s, dt_s)
-    # 基础正弦波，模拟日夜变化
     base_wind = 5e6 * (np.sin(2 * np.pi * time_series / 86400) + 1.5)
-    # 高频噪声，模拟阵风
     noise = 1e6 * np.random.randn(len(time_series))
-    # 组合信号
     raw_wind_fine = base_wind + noise
-    raw_wind_fine[raw_wind_fine < 0] = 0  # 风力不能为负
-    # 降采样以匹配上层MPC
+    raw_wind_fine[raw_wind_fine < 0] = 0
     downsample_ratio = int(900 / dt_s)
     raw_wind_upper = raw_wind_fine[::downsample_ratio]
     return raw_wind_fine, raw_wind_upper
@@ -93,14 +90,12 @@ def generate_wind_power_data(duration_s, dt_s):
 
 def generate_solar_power_data(duration_s, dt_s):
     time_series = np.arange(0, duration_s, dt_s)
-    # 模拟日出日落的抛物线形状
     solar_noon = duration_s / 2
     solar_intensity = - (time_series - solar_noon) ** 2 / (solar_noon ** 2) + 1
     solar_intensity[solar_intensity < 0] = 0
     base_solar = 8e6 * solar_intensity
-    # 云层遮挡模拟
-    cloud_effect = np.ones_like(time_series)
-    for _ in range(5):  # 模拟5次云层遮挡
+    cloud_effect = np.ones(len(time_series), dtype=float)
+    for _ in range(5):
         start = np.random.randint(0, len(time_series) - 3600)
         end = start + np.random.randint(300, 1800)
         cloud_effect[start:end] *= np.random.uniform(0.2, 0.6)
@@ -112,10 +107,8 @@ def generate_solar_power_data(duration_s, dt_s):
 
 def generate_load_data(duration_s, dt_s):
     time_series = np.arange(0, duration_s, dt_s)
-    # 基础负荷曲线，模拟早晚高峰
     base_load = 10e6 + 5e6 * np.sin(2 * np.pi * (time_series - 6 * 3600) / 86400) + \
                 3e6 * np.sin(4 * np.pi * (time_series - 9 * 3600) / 86400)
-    # 随机波动
     noise = 0.5e6 * np.random.randn(len(time_series))
     load_power_fine = base_load + noise
     downsample_ratio = int(900 / dt_s)
@@ -125,13 +118,13 @@ def generate_load_data(duration_s, dt_s):
 
 def generate_grid_price_data(duration_s, dt_s):
     time_series = np.arange(0, duration_s, dt_s)
-    # 峰谷电价模型
-    prices = np.ones(len(time_series)) * 300  # 平时段
+    prices = np.ones(len(time_series)) * 300
     hour = (time_series / 3600) % 24
-    prices[(hour >= 10) & (hour < 15)] = 600  # 峰时段1
-    prices[(hour >= 18) & (hour < 21)] = 700  # 峰时段2
-    prices[(hour >= 0) & (hour < 6)] = 150  # 谷时段
-    return prices
+    prices[(hour >= 10) & (hour < 15)] = 600
+    prices[(hour >= 18) & (hour < 21)] = 700
+    prices[(hour >= 0) & (hour < 6)] = 150
+    downsample_ratio = int(900 / dt_s)
+    return prices[::downsample_ratio]
 
 
 # =============================================================================
@@ -139,64 +132,61 @@ def generate_grid_price_data(duration_s, dt_s):
 # =============================================================================
 if __name__ == '__main__':
     # 系统参数设置
-    duration = 24 * 3600  # 仿真时长 (s) -> 24小时
-    dt_lower = 1  # 下层时间步长 (s) -> 1秒
-    dt_upper = 15 * 60  # 上层时间步长 (s) -> 15分钟
+    duration = 24 * 3600
+    dt_lower = 1
+    dt_upper = 15 * 60
 
-    horizon_lower = int(10 * 60 / dt_lower)  # 下层预测时域 -> 10分钟
-    horizon_upper = int(6 * 3600 / dt_upper)  # 上层预测时域 -> 6小时
+    horizon_lower_s = 10 * 60
+    horizon_upper_s = 6 * 3600
+
+    horizon_lower = int(horizon_lower_s / dt_lower)
+    horizon_upper = int(horizon_upper_s / dt_upper)
 
     time_series_lower = np.arange(0, duration, dt_lower)
     time_series_upper = np.arange(0, duration, dt_upper)
 
-    # 生成原始数据 (风、光、负荷、电价)
+    # 生成原始数据
     raw_wind_fine, raw_wind_upper = generate_wind_power_data(duration, dt_lower)
     solar_power_fine, solar_power_upper = generate_solar_power_data(duration, dt_lower)
     load_power_fine, load_power_upper = generate_load_data(duration, dt_lower)
-    grid_prices_upper = generate_grid_price_data(duration, dt_upper)
+    grid_prices_upper = generate_grid_price_data(duration, dt_lower)
 
-    # ================= 关键变量定义 =================
-    # 计算整个仿真周期内的、高精度的净负荷曲线 (这是所有分析的基础)
+    # 计算净负荷
     net_load_fine = load_power_fine - (raw_wind_fine + solar_power_fine)
-    # 计算上层时间尺度的净负荷
     net_load_upper = load_power_upper - (raw_wind_upper + solar_power_upper)
-    # ==============================================
 
     # 1. 初始化混合储能系统 (HESS)
     hess = HybridEnergyStorageSystem(dt_lower)
-    # 添加所有8种储能单元
-    hess.add_unit(FlywheelModel(id='fw', dt_s=dt_lower))
-    hess.add_unit(Supercapacitor(id='sc', dt_s=dt_lower))
-    hess.add_unit(SuperconductingMagneticEnergyStorage(id='smes', dt_s=dt_lower))
-    hess.add_unit(ElectrochemicalEnergyStorage(id='ees', dt_s=dt_lower))
-    hess.add_unit(PumpedHydroStorage(id='phs', dt_s=dt_lower))
-    hess.add_unit(HydrogenStorage(id='hes', dt_s=dt_lower))
-    hess.add_unit(ThermalEnergyStorage(id='tes', dt_s=dt_lower))
-    hess.add_unit(DiabaticCAES(id='caes', dt_s=dt_lower))
+    hess.add_unit(FlywheelModel(ess_id='fw', dt_s=dt_lower))
+    hess.add_unit(Supercapacitor(ess_id='sc', dt_s=dt_lower))
+    hess.add_unit(SuperconductingMagneticEnergyStorage(ess_id='smes', dt_s=dt_lower))
+    hess.add_unit(ElectrochemicalEnergyStorage(ess_id='ees', dt_s=dt_lower))
+    hess.add_unit(PumpedHydroStorage(ess_id='phs', dt_s=dt_lower))
+    hess.add_unit(HydrogenStorage(ess_id='hes', dt_s=dt_lower))
+    hess.add_unit(ThermalEnergyStorage(ess_id='tes', dt_s=dt_lower))
+    hess.add_unit(DiabaticCAES(ess_id='caes', dt_s=dt_lower))
 
     # 2. 初始化分层MPC控制器
-    ems = HierarchicalMPCEms(hess, horizon_upper, horizon_lower)
+    ems = HierarchicalMPCEms(hess, horizon_upper, horizon_lower, dt_upper, dt_lower)
 
     # 3. 初始化结果记录字典
     results = {
-        'p_hess_total': [],
-        'p_grid_exchange': [],
+        'p_hess_total': [], 'p_grid_exchange': [],
         'soc': {uid: [] for uid in hess.all_units.keys()},
         'dispatch': {uid: [] for uid in hess.all_units.keys()}
     }
 
     # 4. 主仿真循环
-    # 增加一个变量来存储上层计划，确保下层能随时获取
     p_grid_plan_upper = np.zeros(ems.PH_upper)
     slow_asset_dispatch_plan_upper = {unit.id: np.zeros(ems.PH_upper) for unit in ems.energy_assets}
 
     for k_lower, t_lower in enumerate(time_series_lower):
-        if k_lower % 100 == 0:
-            print(f"Simulating... Time: {t_lower / 3600:.2f}h / {duration / 3600}h")
+        if k_lower % 900 == 0:
+            print(f"仿真进行中... 时间: {t_lower / 3600:.2f}h / {duration / 3600}h")
 
         current_soc = hess.get_all_soc()
 
-        # A. 信号分解：在每次下层MPC求解前，对未来的净负荷进行分解
+        # A. 信号分解
         net_load_fine_forecast = net_load_fine[k_lower: k_lower + ems.PH_lower]
         if len(net_load_fine_forecast) < ems.PH_lower:
             padding_size = ems.PH_lower - len(net_load_fine_forecast)
@@ -208,57 +198,68 @@ if __name__ == '__main__':
         high_task_signal = decomposed_signals["high"]
 
         # B. 上层MPC求解 (周期性执行)
-        if t_lower % dt_upper == 0:
+        if k_lower % int(dt_upper / dt_lower) == 0:
             k_upper = int(t_lower // dt_upper)
 
-            net_load_upper_forecast = net_load_upper[k_upper: k_upper + ems.PH_upper]
-            prices_upper_forecast = grid_prices_upper[k_upper: k_upper + ems.PH_upper]
+            # ======================= ## 核心修正 ## =======================
+            # 在进行数据切片前，先检查索引是否会越界
+            if k_upper < len(net_load_upper):
+                # 准备上层MPC所需的预测数据
+                net_load_upper_forecast = net_load_upper[k_upper: k_upper + ems.PH_upper]
+                prices_upper_forecast = grid_prices_upper[k_upper: k_upper + ems.PH_upper]
 
-            downsample_ratio = int(dt_upper / dt_lower)
-            slow_task_signal_upper = slow_task_signal[::downsample_ratio]
+                # 如果预测时域超出了数据末尾，则用最后一个有效值进行填充
+                if len(net_load_upper_forecast) < ems.PH_upper:
+                    pad_size = ems.PH_upper - len(net_load_upper_forecast)
+                    net_load_upper_forecast = np.pad(net_load_upper_forecast, (0, pad_size), 'edge')
+                    prices_upper_forecast = np.pad(prices_upper_forecast, (0, pad_size), 'edge')
 
-            if len(slow_task_signal_upper) < ems.PH_upper:
-                padding_size = ems.PH_upper - len(slow_task_signal_upper)
-                slow_task_signal_upper = np.pad(slow_task_signal_upper, (0, padding_size), 'edge')
+                # 降采样低频信号
+                downsample_ratio = int(dt_upper / dt_lower)
+                slow_task_signal_upper = slow_task_signal[::downsample_ratio]
+                if len(slow_task_signal_upper) < ems.PH_upper:
+                    pad_size = ems.PH_upper - len(slow_task_signal_upper)
+                    slow_task_signal_upper = np.pad(slow_task_signal_upper, (0, pad_size), 'edge')
 
-            dispatch_upper = ems.solve_upper_level(
-                current_soc,
-                net_load_upper_forecast,
-                prices_upper_forecast,
-                slow_task_signal_upper
-            )
+                # 调用上层MPC求解器
+                dispatch_upper = ems.solve_upper_level(
+                    current_soc, net_load_upper_forecast,
+                    prices_upper_forecast, slow_task_signal_upper
+                )
 
-            if dispatch_upper and dispatch_upper.get("status") == "optimal":
-                p_grid_plan_upper = dispatch_upper["grid_exchange"]
-                slow_asset_dispatch_plan_upper = dispatch_upper["dispatch"]
-            else:
-                p_grid_plan_upper = np.zeros(ems.PH_upper)
-                slow_asset_dispatch_plan_upper = {unit.id: np.zeros(ems.PH_upper) for unit in ems.energy_assets}
+                # 更新上层计划
+                if dispatch_upper and dispatch_upper.get("status") == "optimal":
+                    p_grid_plan_upper = dispatch_upper["grid_exchange"]
+                    slow_asset_dispatch_plan_upper = dispatch_upper["dispatch"]
+                else:
+                    p_grid_plan_upper.fill(0)
+                    for plan in slow_asset_dispatch_plan_upper.values():
+                        plan.fill(0)
+            # 如果 k_upper 越界，则不执行任何操作，沿用上一次的计划
+            # =============================================================
 
-        # C. 下层MPC求解 (每次都执行)
-        # 将上层计划插值到下层时间尺度，作为下层的参考和已知条件
-        reference_signals = {"slow_asset_dispatch": {}}
+        # C. 下层MPC求解
+        slow_asset_dispatch_ref_lower = {}
+        t_upper_future = np.arange(ems.PH_upper) * dt_upper
+        t_lower_future = np.arange(ems.PH_lower) * dt_lower
         for uid, dispatch_plan_upper in slow_asset_dispatch_plan_upper.items():
-            t_upper_future = np.arange(ems.PH_upper) * dt_upper
-            t_lower_future = np.arange(ems.PH_lower) * dt_lower
             dispatch_plan_lower = np.interp(t_lower_future, t_upper_future, dispatch_plan_upper)
-            reference_signals["slow_asset_dispatch"][uid] = dispatch_plan_lower
+            slow_asset_dispatch_ref_lower[uid] = dispatch_plan_lower
 
         dispatch_lower = ems.solve_lower_level(
-            current_soc,
-            reference_signals,
-            mid_task_signal,
-            high_task_signal
+            current_soc, slow_asset_dispatch_ref_lower,
+            mid_task_signal, high_task_signal
         )
 
         # D. 更新系统状态和记录结果
-        # 从下层MPC的求解结果中获取当前时刻 t=0 的调度指令
-        current_dispatch = {uid.replace("_power", ""): pwr for uid, pwr in dispatch_lower.items()}
+        current_dispatch = {}
+        for uid, pwr in dispatch_lower.items():
+            current_dispatch[uid] = pwr
+        for uid, pwr_plan in slow_asset_dispatch_ref_lower.items():
+            current_dispatch[uid] = pwr_plan[0]
 
-        # 更新HESS中每个单元的状态
         hess.update_all_states(current_dispatch)
 
-        # 记录当前时刻的调度和SOC
         total_hess_power = 0
         for uid, unit in hess.all_units.items():
             power = current_dispatch.get(uid, 0)
@@ -267,14 +268,8 @@ if __name__ == '__main__':
             total_hess_power += power
         results['p_hess_total'].append(total_hess_power)
 
-        # 记录当前时刻的电网交互功率
-        # 需要找到当前下层时间步，对应在上层计划中的哪个位置
-        k_in_upper_plan = int((t_lower % dt_upper) / dt_lower)
-        current_p_grid = 0
-        if p_grid_plan_upper is not None and k_in_upper_plan < len(p_grid_plan_upper):
-            # MPC中购电为正，但通常绘图习惯购电为负，所以乘以-1
-            current_p_grid = p_grid_plan_upper[k_in_upper_plan] * -1
-        results["p_grid_exchange"].append(current_p_grid)
+        actual_grid_exchange = net_load_fine[k_lower] - total_hess_power
+        results["p_grid_exchange"].append(actual_grid_exchange)
 
     # 5. 绘制仿真结果
     time_h_lower = time_series_lower / 3600
@@ -286,32 +281,26 @@ if __name__ == '__main__':
     axs1[0].set_title("系统整体功率平衡与电价", fontsize=16)
     axs1[0].set_ylabel("功率 (MW)")
     axs1[0].grid(True)
-
     ax_price = axs1[0].twinx()
     ax_price.plot(time_h_upper, grid_prices_upper, 'r--', label="电价 (元/MWh)", alpha=0.7, zorder=2)
     ax_price.set_ylabel("电价 (元/MWh)")
-
     lines, labels = axs1[0].get_legend_handles_labels()
     lines2, labels2 = ax_price.get_legend_handles_labels()
     ax_price.legend(lines + lines2, labels + labels2, loc='upper right')
-
     axs1[1].plot(time_h_lower, np.array(results["p_hess_total"]) / 1e6, 'k-', label="HESS总出力 (MW)", zorder=3)
     axs1[1].fill_between(time_h_lower, np.array(results["p_grid_exchange"]) / 1e6,
-                         label="电网购电(负)/售电(正) (MW)", color='gray', alpha=0.5, zorder=1)
+                         label="电网购电(正)/售电(负) (MW)", color='gray', alpha=0.5, zorder=1)
     axs1[1].set_xlabel("时间 (小时)", fontsize=12)
     axs1[1].set_ylabel("功率 (MW)")
     axs1[1].grid(True)
     axs1[1].legend()
+    fig1.tight_layout()
 
     # 图2：分解的任务信号
     fig2, axs2 = plt.subplots(3, 1, figsize=(16, 12), sharex=True)
-    # 为了看得清楚，只绘制仿真前段的数据
     plot_len = int(2 * 3600 / dt_lower)
     time_h_plot = time_h_lower[:plot_len]
-
-    # 重新计算前段的分解信号用于绘图
     decomposed_plot_signals = decompose_power_signal(net_load_fine[:plot_len], wavelet='db4', level=3)
-
     axs2[0].plot(time_h_plot, decomposed_plot_signals['low'] / 1e6, label="低频任务信号 (能量型储能)")
     axs2[0].set_title("小波包分解后的功率任务信号 (前2小时)", fontsize=16)
     axs2[1].plot(time_h_plot, decomposed_plot_signals['mid'] / 1e6, label="中频任务信号 (平滑型储能)")
@@ -321,13 +310,13 @@ if __name__ == '__main__':
         ax.grid(True)
         ax.legend()
     axs2[2].set_xlabel("时间 (小时)", fontsize=12)
+    fig2.tight_layout()
 
     # 图3：各储能组出力情况
     fig3, axs3 = plt.subplots(3, 1, figsize=(16, 12), sharex=True)
     p_energy = np.sum([results['dispatch'][u.id] for u in ems.energy_assets], axis=0)
     p_smoothing = np.sum([results['dispatch'][u.id] for u in ems.smoothing_assets], axis=0)
     p_power = np.sum([results['dispatch'][u.id] for u in ems.power_assets], axis=0)
-
     axs3[0].plot(time_h_lower, p_energy / 1e6, label="能量型储能组总出力")
     axs3[0].set_title("各功能储能组出力", fontsize=16)
     axs3[1].plot(time_h_lower, p_smoothing / 1e6, label="平滑型储能组总出力")
@@ -337,16 +326,17 @@ if __name__ == '__main__':
         ax.grid(True)
         ax.legend()
     axs3[2].set_xlabel("时间 (小时)", fontsize=12)
+    fig3.tight_layout()
 
     # 图4：各类储能SOC变化
     fig4, axs4 = plt.subplots(len(hess.all_units), 1, figsize=(16, 20), sharex=True)
     fig4.suptitle("所有储能单元SOC变化", fontsize=16)
     for i, (uid, unit) in enumerate(hess.all_units.items()):
-        axs4[i].plot(time_h_lower, results['soc'][uid], label=f"SOC of {uid}")
+        axs4[i].plot(time_h_lower, results['soc'][uid], label=f"{unit.id} 的SOC曲线")
         axs4[i].set_ylabel(f"SOC_{uid}")
         axs4[i].grid(True)
         axs4[i].legend()
+        axs4[i].set_ylim(-0.05, 1.05)
     axs4[-1].set_xlabel("时间 (小时)", fontsize=12)
-
     plt.tight_layout(rect=[0, 0, 1, 0.98])
     plt.show()
