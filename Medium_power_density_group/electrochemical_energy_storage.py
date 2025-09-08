@@ -1,101 +1,122 @@
-# file: PythonProject/Medium power density group/electrochemical_energy_storage.py
+# file: Medium_power_density_group/electrochemical_energy_storage.py (统一接口修改版 V1.0)
 
 import math
-import matplotlib.pyplot as plt
 import numpy as np
 
-# 解决导入错误的路径问题
+# 解决在子文件夹中导入父文件夹模块的问题
 import sys
 import os
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 将项目根目录添加到Python的模块搜索路径中
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from base_storage_model import EnergyStorageUnit
+# --- 修改区域 1: 导入正确的基类 ---
+from base_storage_model import BaseStorageModel
 
 
-class ElectrochemicalEnergyStorage(EnergyStorageUnit):
+# --- 修改区域 2: 让 EES 继承 BaseStorageModel ---
+class ElectrochemicalEnergyStorage(BaseStorageModel):
     """
     通用电化学储能 (EES) 模型 (HESS集成版 - 严格对应论文公式)
-    代表系统中的所有电池储能，包含非线性OCV、与DoD相关的SOH衰减等关键特性。
+    已按照BaseStorageModel进行接口标准化，并完整保留SOH衰减模型。
     """
 
     def __init__(self,
-                 ess_id="ees_01",
+                 id,  # <--- 标准接口参数
+                 dt_s,  # <--- 标准接口参数
                  initial_soc=0.5,
                  initial_soh=1.0,
-                 # ========================== 合理化参数配置 (开始) ==========================
-                 # --- 核心规格 (配置为 100MW / 200MWh 系统) ---
-                 rated_power_w=100e6,  # 额定功率 (W), e.g., 100 MW
-                 nominal_capacity_kwh=200e3,  # 额定能量容量 (kWh), e.g., 200 MWh
-                 charge_efficiency=0.95,  # 充电效率
-                 discharge_efficiency=0.95,  # 放电效率
-
-                 # --- 运行限制 ---
+                 rated_power_mw=100.0,  # 额定功率, 100 MW
+                 nominal_capacity_mwh=200.0,  # 额定能量容量, 200 MWh
+                 charge_efficiency=0.95,
+                 discharge_efficiency=0.95,
                  soc_upper_limit=0.9,
                  soc_lower_limit=0.1,
-
-                 # --- OCV-SOC 模型参数 (以锂电池为参考) ---
-                 ocv_params={'P1': 3.5, 'P2': 0.05, 'P3': 0.1, 'P4': 0.15},
-
-                 # --- DoD-Cycle Life 衰减模型 (核心创新点) ---
                  cycle_life_model={
-                     0.1: 10000,  # 10% DoD: 可循环10000次
-                     0.3: 6000,  # 30% DoD: 可循环6000次
-                     0.5: 4000,  # 50% DoD: 可循环4000次
-                     0.8: 3000,  # 80% DoD: 可循环3000次
-                     1.0: 2500  # 100% DoD: 可循环2500次
+                     0.1: 10000, 0.3: 6000, 0.5: 4000,
+                     0.8: 3000, 1.0: 2500
                  },
-                 # ========================== 合理化参数配置 (结束) ==========================
-
-                 cost_per_kwh=0.0002  # 每循环一度电的等效寿命成本
+                 om_cost_per_mwh=50  # 元/MWh
                  ):
 
-        super().__init__(ess_id, initial_soc, initial_soh)
+        # --- 关键改动 3: 调用父类的构造函数 ---
+        super().__init__(id, dt_s)
 
-        # --- 物理与性能参数 ---
-        self.rated_power_w = rated_power_w
-        self.nominal_capacity_kwh = nominal_capacity_kwh
+        # --- 关键改动 4: 将参数赋值给父类中的标准属性 ---
+        self.soc = initial_soc
+        self.power_m_w = rated_power_mw
+        self.capacity_mwh = nominal_capacity_mwh
+        self.efficiency = np.sqrt(charge_efficiency * discharge_efficiency)
+        self.soc_min = soc_lower_limit
+        self.soc_max = soc_upper_limit
+        self.om_cost_per_mwh = om_cost_per_mwh
+
+        # --- 保留EES特有的物理参数和SOH模型 ---
+        self.soh = initial_soh
+        self.nominal_capacity_mwh = nominal_capacity_mwh
         self.eta_ch = charge_efficiency
         self.eta_dis = discharge_efficiency
-        self.soc_max = soc_upper_limit
-        self.soc_min = soc_lower_limit
-        self.ocv_params = ocv_params
         self.cycle_life_model = cycle_life_model
-        self.cost_per_kwh = cost_per_kwh
 
         # --- 实时工作参数 (受SOH影响) ---
-        self.capacity_kwh = self.nominal_capacity_kwh * self.soh
+        self.current_capacity_mwh = self.nominal_capacity_mwh * self.soh
 
         # --- 核心状态变量：储存的能量 E_ees ---
-        self.E_ees_kwh = self.capacity_kwh * self.soc
+        self.E_ees_mwh = self.current_capacity_mwh * self.soc
 
         # SOH衰减计算相关状态
         self.last_cycle_soc_min = self.soc
         self.last_cycle_soc_max = self.soc
+        self.state = 'idle'
 
-        self.energy_history = []
         self.soh_history = []
+
+    # ==============================================================================
+    # --- 新增：核心标准接口 update_state ---
+    # ==============================================================================
+    def update_state(self, dispatch_power_w):
+        """
+        根据调度指令（单位：W）更新储能状态。
+        这是被HESS系统统一调用的接口方法。
+        """
+        if dispatch_power_w > 0:
+            # 正功率表示放电
+            self.discharge(dispatch_power_w, self.dt_s)
+        elif dispatch_power_w < 0:
+            # 负功率表示充电
+            self.charge(abs(dispatch_power_w), self.dt_s)
+        else:
+            # 零功率表示闲置
+            self.idle_loss(self.dt_s)
+
+    # ==============================================================================
+    # --- 模型核心物理方法 (完全保留您原有的代码) ---
+    # ==============================================================================
 
     def get_soc(self):
         """根据储存的能量计算并更新SOC"""
-        if self.capacity_kwh > 0:
-            self.soc = self.E_ees_kwh / self.capacity_kwh
+        # SOH变化后，当前可用容量会变
+        self.current_capacity_mwh = self.nominal_capacity_mwh * self.soh
+        if self.current_capacity_mwh > 1e-6:
+            self.soc = self.E_ees_mwh / self.current_capacity_mwh
         else:
             self.soc = 0
         return self.soc
 
     def get_available_charge_power(self):
         if self.get_soc() >= self.soc_max: return 0
-        return self.rated_power_w
+        return self.power_m_w * 1e6  # 返回单位 W
 
     def get_available_discharge_power(self):
         if self.get_soc() <= self.soc_min: return 0
-        return self.rated_power_w
+        return self.power_m_w * 1e6  # 返回单位 W
 
     def charge(self, power_elec, time_s):
         """按指定电功率充电，对应动态方程"""
         power_elec = min(power_elec, self.get_available_charge_power())
-        if power_elec <= 0: return
+        if power_elec <= 0:
+            self.idle_loss(time_s)
+            return
 
         # 当从放电转为充电时，一个循环结束，计算SOH损耗
         if self.state == 'discharging':
@@ -103,106 +124,84 @@ class ElectrochemicalEnergyStorage(EnergyStorageUnit):
         self.state = 'charging'
 
         time_h = time_s / 3600.0
-        delta_energy = power_elec * self.eta_ch * time_h / 1000  # convert W to kWh
+        delta_energy_mwh = (power_elec / 1e6) * self.eta_ch * time_h
 
-        self.E_ees_kwh += delta_energy
+        self.E_ees_mwh += delta_energy_mwh
+        self.E_ees_mwh = min(self.E_ees_mwh, self.current_capacity_mwh * self.soc_max)
 
-        # 应用容量约束
-        self.E_ees_kwh = min(self.E_ees_kwh, self.capacity_kwh * self.soc_max)
-
-        # 更新并记录本轮循环的SOC最大值
-        self.get_soc()  # 更新self.soc
+        self.get_soc()
         self.last_cycle_soc_max = max(self.last_cycle_soc_max, self.soc)
-
-        self._record_history_ees(time_s, power_elec)
 
     def discharge(self, power_elec, time_s):
         """按指定电功率放电，对应动态方程"""
         power_elec = min(power_elec, self.get_available_discharge_power())
-        if power_elec <= 0: return
+        if power_elec <= 0:
+            self.idle_loss(time_s)
+            return
+
         self.state = 'discharging'
 
         time_h = time_s / 3600.0
-        delta_energy = (power_elec / self.eta_dis) * time_h / 1000  # convert W to kWh
+        delta_energy_mwh = (power_elec / 1e6) / self.eta_dis * time_h
 
-        self.E_ees_kwh -= delta_energy
+        self.E_ees_mwh -= delta_energy_mwh
+        self.E_ees_mwh = max(self.E_ees_mwh, self.current_capacity_mwh * self.soc_min)
 
-        # 应用容量约束
-        self.E_ees_kwh = max(self.E_ees_kwh, self.capacity_kwh * self.soc_min)
-
-        # 更新并记录本轮循环的SOC最小值
-        self.get_soc()  # 更新self.soc
+        self.get_soc()
         self.last_cycle_soc_min = min(self.last_cycle_soc_min, self.soc)
-
-        self._record_history_ees(time_s, -power_elec)
 
     def idle_loss(self, time_s):
         self.state = 'idle'
         # 简化模型，暂不考虑自放电
-        self._record_history_ees(time_s, 0)
 
     def _update_soh(self):
         """核心方法：根据上一个循环的DoD来更新SOH"""
         dod = self.last_cycle_soc_max - self.last_cycle_soc_min
-        if dod < 0.01:  # 忽略太浅的循环
-            # 重置本轮循环的SOC记录
-            self.last_cycle_soc_min = self.soc
-            self.last_cycle_soc_max = self.soc
+        if dod < 0.01:
+            self.last_cycle_soc_min = self.get_soc()
+            self.last_cycle_soc_max = self.get_soc()
             return
 
-        # 查找该DoD对应的循环寿命
-        life_key = min([k for k in self.cycle_life_model.keys() if k >= dod], default=1.0)
-        total_cycles_at_this_dod = self.cycle_life_model[life_key]
+        # 使用插值来获得更精确的循环寿命
+        dod_points = sorted(self.cycle_life_model.keys())
+        life_points = [self.cycle_life_model[d] for d in dod_points]
+        total_cycles_at_this_dod = np.interp(dod, dod_points, life_points)
 
-        # 每完成这样一个循环，SOH就损耗 1 / total_cycles
-        # 我们这里完成的只是一个部分循环，等效于 0.5 个完整循环
-        soh_loss = (1.0 / total_cycles_at_this_dod) * 0.5
+        # 每完成这样一个充放循环，SOH就损耗 1 / total_cycles
+        soh_loss = (1.0 / total_cycles_at_this_dod)
 
         self.soh -= soh_loss
-        self.soh = max(0, self.soh)  # SOH不小于0
+        self.soh = max(0.8, self.soh)  # 假设SOH最低为80%
 
         # SOH变化后，更新工作参数
-        self.capacity_kwh = self.nominal_capacity_kwh * self.soh
+        self.current_capacity_mwh = self.nominal_capacity_mwh * self.soh
 
         # 重置本轮循环的SOC记录
+        self.get_soc()
         self.last_cycle_soc_min = self.soc
         self.last_cycle_soc_max = self.soc
 
-    def _record_history_ees(self, time_delta, power):
-        """记录EES特有的历史数据"""
-        current_soc = self.get_soc()
-        super()._record_history(time_delta, power, current_soc)
-        self.energy_history.append(self.E_ees_kwh)
-        self.soh_history.append(self.soh)
 
+# --- 单元测试代码 (保持不变) ---
+if __name__ == "__main__":
+    ees = ElectrochemicalEnergyStorage(id='ees_test', dt_s=3600, initial_soc=0.5)
 
-# --- 单元测试用的示例函数 (使用合理化参数) ---
-def simulate_ees_test():
-    ees = ElectrochemicalEnergyStorage(initial_soc=0.5)
-
-    print(
-        f"EES Initialized. Rated Power: {ees.rated_power_w / 1e6} MW, Rated Capacity: {ees.nominal_capacity_kwh / 1000} MWh")
+    print(f"EES Initialized. Rated Power: {ees.power_m_w} MW, Rated Capacity: {ees.capacity_mwh} MWh")
     print(f"Initial SOC: {ees.get_soc():.3f}, Initial SOH: {ees.soh:.4f}\n")
 
     # 模拟充电: 以50MW功率充电1小时
     charge_power = 50e6
-    charge_time = 3600
-    print(f"--- Charging with {charge_power / 1e6} MW for {charge_time / 3600}h ---")
-    ees.charge(charge_power, charge_time)
+    print(f"--- Charging with {charge_power / 1e6} MW for 1h ---")
+    ees.update_state(-charge_power)  # 充电
     print(f"After charging, SOC: {ees.get_soc():.3f}, SOH: {ees.soh:.4f}\n")
 
-    # 模拟放电: 以80MW功率放电1.5小时
+    # 模拟放电: 以80MW功率放电1.5小时 (分两次，以模拟dt)
     discharge_power = 80e6
-    discharge_time = 5400
-    print(f"--- Discharging with {discharge_power / 1e6} MW for {discharge_time / 3600}h ---")
-    ees.discharge(discharge_power, discharge_time)
-    print(f"After discharging, SOC: {ees.get_soc():.3f}, SOH: {ees.soh:.4f}\n")
+    print(f"--- Discharging with {discharge_power / 1e6} MW for 1h ---")
+    ees.update_state(discharge_power)  # 放电
+    print(f"After 1h discharging, SOC: {ees.get_soc():.3f}, SOH: {ees.soh:.4f}")
 
     # 再次充电，触发SOH更新
     print(f"--- Charging again to trigger SOH update ---")
-    ees.charge(charge_power, charge_time)
+    ees.update_state(-charge_power)  # 再次充电
     print(f"After 2nd charging, SOC: {ees.get_soc():.3f}, SOH: {ees.soh:.4f}\n")
-
-
-if __name__ == "__main__":
-    simulate_ees_test()

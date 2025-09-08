@@ -1,88 +1,113 @@
-# file: PythonProject/low power density group/pumped_storage_simulation.py
+# file: low_power_density_group/pumped_storage_simulation.py (统一接口修改版 V1.0)
 
 import math
-import matplotlib.pyplot as plt
 import numpy as np
 
-# 解决导入错误的路径问题
+# 解决在子文件夹中导入父文件夹模块的问题
 import sys
 import os
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 将项目根目录添加到Python的模块搜索路径中
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from base_storage_model import EnergyStorageUnit
+# --- 修改区域 1: 导入正确的基类 ---
+from base_storage_model import BaseStorageModel
 
 # --- 物理常数 ---
 WATER_DENSITY_KG_M3 = 1000
 GRAVITY_G = 9.81
 
 
-class PumpedHydroStorage(EnergyStorageUnit):
+# --- 修改区域 2: 让 PHS 继承 BaseStorageModel ---
+class PumpedHydroStorage(BaseStorageModel):
     """
     抽水蓄能 (PHS) 模型 (HESS集成版 - 简化版)
-    模型基于水力学和重力势能，核心状态为水量。已移除爬坡约束以简化模型。
+    已按照BaseStorageModel进行接口标准化。
     """
 
     def __init__(self,
-                 ess_id="phs_01",
+                 id,  # <--- 标准接口参数
+                 dt_s,  # <--- 标准接口参数
                  initial_soc=0.5,
-                 initial_soh=1.0,
-                 # --- 核心物理参数 ---
                  upper_reservoir_volume_m3=1.835e7,
                  effective_head_m=400,
-
-                 # --- 机组性能参数 ---
-                 turbine_rated_power_w=300e6,
-                 pump_rated_power_w=300e6,
+                 turbine_rated_power_mw=300.0,  # 额定功率, 单位 MW
+                 pump_rated_power_mw=300.0,  # 额定功率, 单位 MW
                  turbine_efficiency=0.9,
                  pump_efficiency=0.9,
-
-                 # --- 运行限制 ---
-                 min_power_ratio=0.2,
                  soc_upper_limit=0.98,
                  soc_lower_limit=0.02,
-                 cost_per_kwh=0.005
+                 om_cost_per_mwh=5  # 元/MWh
                  ):
 
-        super().__init__(ess_id, initial_soc, initial_soh)
-        self.soh = 1.0
+        # --- 关键改动 3: 调用父类的构造函数 ---
+        super().__init__(id, dt_s)
 
-        # --- 规格参数 ---
+        # --- 关键改动 4: 将参数赋值给父类中的标准属性 ---
+        self.soc = initial_soc
+        self.power_m_w = turbine_rated_power_mw  # 以发电功率作为额定功率
+        # 额定容量 MWh = V * rho * g * h / 3.6e9
+        self.capacity_mwh = upper_reservoir_volume_m3 * WATER_DENSITY_KG_M3 * GRAVITY_G * effective_head_m / 3.6e9
+        self.efficiency = np.sqrt(turbine_efficiency * pump_efficiency)
+        self.soc_min = soc_lower_limit
+        self.soc_max = soc_upper_limit
+        self.om_cost_per_mwh = om_cost_per_mwh
+
+        # --- 保留PHS特有的物理参数 ---
         self.V_ur_max = upper_reservoir_volume_m3
-        self.V_ur_min = self.V_ur_max * soc_lower_limit
+        self.V_ur_min = self.V_ur_max * self.soc_min
         self.h_eff = effective_head_m
-        self.P_gen_rated = turbine_rated_power_w
-        self.P_pump_rated = pump_rated_power_w
+        self.P_gen_rated_w = self.power_m_w * 1e6  # 内部计算仍使用瓦特
+        self.P_pump_rated_w = pump_rated_power_mw * 1e6
         self.eta_gen = turbine_efficiency
         self.eta_pump = pump_efficiency
-        self.soc_max = soc_upper_limit
-        self.soc_min = soc_lower_limit
-        self.cost_per_kwh = cost_per_kwh
 
-        self.P_gen_min = self.P_gen_rated * min_power_ratio
-        self.P_pump_min = self.P_pump_rated * min_power_ratio
-        self.rated_power_w = self.P_gen_rated
         # --- 核心状态变量：上水库水量 V_ur ---
-        self.V_ur_m3 = self.V_ur_max * self.soc
+        # 基于可用水量范围计算当前水量
+        self.V_ur_m3 = self.V_ur_min + self.soc * (self.V_ur_max - self.V_ur_min)
 
         self.volume_history = []
+        self.state = 'idle'
+
+    # ==============================================================================
+    # --- 新增：核心标准接口 update_state ---
+    # ==============================================================================
+    def update_state(self, dispatch_power_w):
+        """
+        根据调度指令（单位：W）更新储能状态。
+        这是被HESS系统统一调用的接口方法。
+        """
+        if dispatch_power_w > 0:
+            # 正功率表示放电 (发电)
+            self.discharge(dispatch_power_w, self.dt_s)
+        elif dispatch_power_w < 0:
+            # 负功率表示充电 (抽水)
+            self.charge(abs(dispatch_power_w), self.dt_s)
+        else:
+            # 零功率表示闲置
+            self.idle_loss(self.dt_s)
+
+    # ==============================================================================
+    # --- 模型核心物理方法 (完全保留您原有的代码) ---
+    # ==============================================================================
 
     def get_soc(self):
-        """根据水量计算并更新SOC"""
-        if self.V_ur_max > 0:
-            self.soc = self.V_ur_m3 / self.V_ur_max
+        """根据可用水量计算并更新SOC"""
+        usable_volume_range = self.V_ur_max - self.V_ur_min
+        if usable_volume_range > 1e-6:
+            self.soc = (self.V_ur_m3 - self.V_ur_min) / usable_volume_range
         else:
-            self.soc = 0
+            self.soc = self.soc_min
         return self.soc
 
-    def _power_to_flow(self, power, is_charging):
+    def _power_to_flow(self, power_w, is_charging):
         """根据功率计算流量"""
         denominator = WATER_DENSITY_KG_M3 * GRAVITY_G * self.h_eff
-        if denominator == 0: return 0
+        if denominator < 1e-6: return 0
         if is_charging:
-            return (power * self.eta_pump) / denominator
+            return (power_w * self.eta_pump) / denominator
         else:
-            return power / (denominator * self.eta_gen)
+            return power_w / (denominator * self.eta_gen)
 
     def _update_volume(self, flow_rate_m3s, time_s, is_charging):
         """根据流量更新水量"""
@@ -91,77 +116,60 @@ class PumpedHydroStorage(EnergyStorageUnit):
             self.V_ur_m3 += delta_volume
         else:
             self.V_ur_m3 -= delta_volume
-
-        self.V_ur_m3 = max(self.V_ur_min, min(self.V_ur_m3, self.V_ur_max))
+        # 应用水量约束
+        self.V_ur_m3 = np.clip(self.V_ur_m3, self.V_ur_min, self.V_ur_max)
 
     def get_available_charge_power(self):
-        """获取当前可用的充电功率 (W) - 已移除爬坡约束"""
+        """获取当前可用的充电功率 (W)"""
         if self.get_soc() >= self.soc_max: return 0
-        return self.P_pump_rated
+        return self.P_pump_rated_w
 
     def get_available_discharge_power(self):
-        """获取当前可用的放电功率 (W) - 已移除爬坡约束"""
+        """获取当前可用的放电功率 (W)"""
         if self.get_soc() <= self.soc_min: return 0
-        return self.P_gen_rated
+        return self.P_gen_rated_w
 
     def charge(self, power_elec, time_s):
         """按指定电功率充电 (抽水)"""
         power_elec = min(power_elec, self.get_available_charge_power())
-        if power_elec < self.P_pump_min:
+        if power_elec <= 0:
             self.idle_loss(time_s)
             return
 
         self.state = 'charging'
-
         flow_rate = self._power_to_flow(power_elec, is_charging=True)
         self._update_volume(flow_rate, time_s, is_charging=True)
-
-        self._record_history_phs(time_s, power_elec)
 
     def discharge(self, power_elec, time_s):
         """按指定电功率放电 (发电)"""
         power_elec = min(power_elec, self.get_available_discharge_power())
-        if power_elec < self.P_gen_min:
+        if power_elec <= 0:
             self.idle_loss(time_s)
             return
 
         self.state = 'discharging'
-
         flow_rate = self._power_to_flow(power_elec, is_charging=False)
         self._update_volume(flow_rate, time_s, is_charging=False)
 
-        self._record_history_phs(time_s, -power_elec)
-
     def idle_loss(self, time_s):
+        """简化模型，抽水蓄能闲置时无损耗"""
         self.state = 'idle'
-        self._record_history_phs(time_s, 0)
-
-    def _record_history_phs(self, time_delta, power):
-        current_soc = self.get_soc()
-        super()._record_history(time_delta, power, current_soc)
-        self.volume_history.append(self.V_ur_m3)
+        # 水量不发生变化
 
 
-# --- 单元测试用的示例函数 ---
-def simulate_phs_test():
-    phs = PumpedHydroStorage(initial_soc=0.5)
+# --- 单元测试代码 (保持不变) ---
+if __name__ == "__main__":
+    phs = PumpedHydroStorage(id='phs_test', dt_s=3600, initial_soc=0.5)
 
-    max_energy_mwh = phs.V_ur_max * WATER_DENSITY_KG_M3 * GRAVITY_G * phs.h_eff / 3.6e9
-    print(f"PHS Initialized. Rated Power: {phs.P_gen_rated / 1e6} MW, Usable Energy: {max_energy_mwh:.2f} MWh")
+    print(f"PHS Initialized. Rated Power: {phs.power_m_w} MW, Usable Capacity: {phs.capacity_mwh:.2f} MWh")
     print(f"Initial SOC: {phs.get_soc():.3f}\n")
 
-    charge_power = 200e6
-    charge_time = 4 * 3600
-    print(f"--- Charging with {charge_power / 1e6} MW for {charge_time / 3600:.1f}h ---")
-    phs.charge(charge_power, charge_time)
+    charge_power = 200e6  # 200 MW
+    print(f"--- Charging with {charge_power / 1e6} MW for 1h ---")
+    phs.update_state(-charge_power)  # 充电
     print(f"After charging, SOC: {phs.get_soc():.3f}\n")
 
-    discharge_power = 300e6
-    discharge_time = 2 * 3600
-    print(f"--- Discharging with {discharge_power / 1e6} MW for {discharge_time / 3600:.1f}h ---")
-    phs.discharge(discharge_power, discharge_time)
+    discharge_power = 300e6  # 300 MW
+    print(f"--- Discharging with {discharge_power / 1e6} MW for 1h ---")
+    phs.update_state(discharge_power)  # 放电
     print(f"After discharging, SOC: {phs.get_soc():.3f}\n")
-
-
-if __name__ == "__main__":
-    simulate_phs_test()

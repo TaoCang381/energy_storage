@@ -1,57 +1,42 @@
-# file: PythonProject/base_storage_model.py
+# file: base_storage_model.py
+# 备注：这是一个所有储能模型的“父类”或“基类”。
+#       它负责处理所有储能单元共有的属性和方法。
 
-class EnergyStorageUnit:
-    """
-    所有储能单元的抽象基类 (Abstract Base Class)。
-    它定义了所有储能模型必须实现的通用接口，
-    确保EMS可以用统一的方式与它们交互。
-    """
+class BaseStorageModel:
+    def __init__(self, id, dt_s):
+        """
+        所有储能模型的通用构造函数。
 
-    # ========================== 错误修正区 (开始) ==========================
-    # 升级__init__方法，使其可以接收所有储能共有的初始状态参数
-    def __init__(self, ess_id, initial_soc=0.5, initial_soh=1.0):# ========================== 错误修正区 (结束) ==========================
-        self.id = ess_id
-        self.state = 'idle'
-        self.soc = initial_soc  # 使用统一的soc属性
-        self.soh = initial_soh  # 使用统一的soh属性
+        参数:
+        id (str): 储能单元的唯一标识符 (例如 'fw', 'ees', 'phs').
+        dt_s (int): 仿真步长 (秒).
+        """
+        if not isinstance(id, str) or not id:
+            raise ValueError("储能单元必须有一个有效的字符串ID。")
 
-        # 历史记录（可选，具体模型可自行扩展）
-        self.time_history = []
-        self.power_history = []
-        self.soc_history = []
+        self.id = id
+        self.dt_s = dt_s
 
-    def charge(self, power, time_s):
-        """按指定功率和时间充电"""
-        raise NotImplementedError(f"{self.id}: 每个储能模型必须实现charge方法")
+        # 初始化一些所有储能都应有的通用状态变量
+        self.soc = 0.5  # 初始SOC
+        self.power_m_w = 0.0  # 额定功率
+        self.capacity_mwh = 0.0  # 额定容量
+        self.efficiency = 1.0  # 默认效率
+        self.soc_min = 0.0
+        self.soc_max = 1.0
+        self.om_cost_per_mwh = 0.0  # 运维成本
 
-    def discharge(self, power, time_s):
-        """按指定功率和时间放电"""
-        raise NotImplementedError(f"{self.id}: 每个储能模型必须实现discharge方法")
+        # 您可以在这里继续添加其他所有储能都共有的参数...
+
+    def update_state(self, dispatch_power):
+        """
+        一个通用的状态更新方法的“占位符”。
+        每个具体的储能模型都应该重写(override)这个方法，实现自己的SOC更新逻辑。
+        """
+        raise NotImplementedError("每个储能子类都必须实现自己的 update_state 方法。")
 
     def get_soc(self):
-        """获取当前荷电状态 (State of Charge)"""
-        # 提供一个默认实现，具体模型可以重写此方法
+        """
+        获取当前SOC.
+        """
         return self.soc
-
-    def get_soh(self):
-        """获取当前健康状态 (State of Health)"""
-        return self.soh
-
-    def get_available_charge_power(self):
-        """获取当前可用的最大充电功率"""
-        raise NotImplementedError(f"{self.id}: 每个储能模型必须实现get_available_charge_power方法")
-
-    def get_available_discharge_power(self):
-        """获取当前可用的最大放电功率"""
-        raise NotImplementedError(f"{self.id}: 每个储能模型必须实现get_available_discharge_power方法")
-
-    def idle_loss(self, time_s):
-        """计算闲置损失"""
-        raise NotImplementedError(f"{self.id}: 每个储能模型必须实现idle_loss方法")
-
-    def _record_history(self, time_delta, power, soc):
-        """内部方法：记录历史数据"""
-        current_time = self.time_history[-1] + time_delta if self.time_history else time_delta
-        self.time_history.append(current_time)
-        self.power_history.append(power)
-        self.soc_history.append(soc)
