@@ -19,7 +19,7 @@ from low_power_density_group.caes_system import DiabaticCAES
 plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
 
-# --- 数据生成函数 (保持不变) ---
+# --- 数据生成函数 ---
 def generate_wind_power_data(duration_s, dt_s):
     # ... (此处省略，保持你原来的函数不变)
     window_duration_s = 3600
@@ -175,5 +175,5 @@ axs[3].legend()
 axs[3].grid(True)
 
 plt.tight_layout()
-plt.savefig("economic_dispatch_results_8_units.png")
+#plt.savefig("economic_dispatch_results_8_units.png")
 plt.show()

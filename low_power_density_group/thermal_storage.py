@@ -22,55 +22,74 @@ class ThermalEnergyStorage(BaseStorageModel):
     """
 
     def __init__(self,
-                 id,  # <--- 标准接口参数
-                 dt_s,  # <--- 标准接口参数
+                 id,
+                 dt_s,
                  initial_soc=0.5,
-                 storage_medium_mass_kg=8e7,
-                 specific_heat_capacity_j_kgk=1500,
+                 # --- 核心修改：我们只定义顶层参数，与基准表保持一致 ---
+                 heater_rated_power_mw=30.0,  # 充电（加热）功率
+                 heat_engine_rated_power_mw=30.0,  # 放电（发电）功率
+                 rated_capacity_mwh=300.0,  # 额定等效电容量
+
+                 # 效率与成本参数
+                 elec_to_heat_efficiency=0.98,  # 电加热效率非常高
+                 heat_to_elec_efficiency=0.45,  # 热转电效率（朗肯循环等），受卡诺循环限制
+                 om_cost_per_mwh=8,
+
+                 # --- 其他关键参数 ---
+                 soc_upper_limit=0.95,
+                 soc_lower_limit=0.1,
+
+                 # --- 物理特性参数（可选择性提供，或使用默认值）---
+                 # 典型熔融盐工作温度
                  max_temp_k=838.15,  # 565°C
                  min_temp_k=563.15,  # 290°C
-                 heater_rated_power_mw=110.0,
-                 heat_engine_rated_power_mw=100.0,
-                 elec_to_heat_efficiency=0.98,
-                 heat_to_elec_efficiency=0.42,
-                 heat_loss_rate_percent_hr=0.04,
-                 soc_upper_limit=1.0,
-                 soc_lower_limit=0.0,
-                 om_cost_per_mwh=10  # 元/MWh
+                 # 典型储热介质比热容
+                 specific_heat_capacity_j_kgk=1500,  # J/(kg·K)
+                 # 每小时热损失率
+                 heat_loss_rate_percent_hr=0.04
                  ):
 
-        # --- 关键改动 3: 调用父类的构造函数 ---
+        # 1. 标准接口初始化
         super().__init__(id, dt_s)
 
-        # SOH对于热储能基本不变
-        self.soh = 1.0
-
-        # --- 关键改动 4: 将参数赋值给父类中的标准属性 ---
+        # 2. 将基准参数赋值给父类的标准属性
         self.soc = initial_soc
-        self.power_m_w = heat_engine_rated_power_mw  # 以热机发电功率作为额定功率
-        # 计算最大储热量 (焦耳)
-        h_tes_max_j = storage_medium_mass_kg * specific_heat_capacity_j_kgk * (max_temp_k - min_temp_k)
-        # 计算等效的电容量 (MWh)
-        self.capacity_mwh = (h_tes_max_j * heat_to_elec_efficiency) / 3.6e9
-        # 计算电-热-电往返效率
-        self.efficiency = elec_to_heat_efficiency * heat_to_elec_efficiency
+        self.power_m_w = heat_engine_rated_power_mw
+        self.capacity_mwh = rated_capacity_mwh
         self.soc_min = soc_lower_limit
         self.soc_max = soc_upper_limit
         self.om_cost_per_mwh = om_cost_per_mwh
+        # 电-热-电往返效率
+        self.efficiency = elec_to_heat_efficiency * heat_to_elec_efficiency
+        self.soh = 1.0  # 热储能SOH衰减很小，简化为1
 
-        # --- 保留TES特有的物理参数 ---
-        self.m = storage_medium_mass_kg
-        self.c = specific_heat_capacity_j_kgk
-        self.T_max = max_temp_k
-        self.T_min = min_temp_k
+        # 3. 保留TES特有的物理参数
         self.P_heater_rated_w = heater_rated_power_mw * 1e6
         self.P_gen_rated_w = self.power_m_w * 1e6
         self.eta_e2h = elec_to_heat_efficiency
         self.eta_h2e = heat_to_elec_efficiency
-        self.theta_loss = (heat_loss_rate_percent_hr / 100) / 3600.0  # 转换为每秒损失率
+        self.T_max = max_temp_k
+        self.T_min = min_temp_k
+        self.c = specific_heat_capacity_j_kgk
+        self.theta_loss = (heat_loss_rate_percent_hr / 100) / 3600.0
 
-        # --- 核心状态变量：储存的热量 H_tes ---
-        self.H_tes_max_J = h_tes_max_j
+        # 4. 根据顶层参数，反向推算内部物理参数
+        # 核心推算：根据能量公式 E_elec = E_heat * eta_h2e, E_heat = m * c * dT
+        # 反算需要多大质量的储热介质
+        # E_elec (J) = capacity_mwh * 3.6e9
+        energy_elec_joules = self.capacity_mwh * 3.6e9
+        if self.eta_h2e > 1e-6:
+            self.H_tes_max_J = energy_elec_joules / self.eta_h2e
+        else:
+            self.H_tes_max_J = 0
+
+        delta_T = self.T_max - self.T_min
+        if self.c * delta_T > 1e-6:
+            self.m = self.H_tes_max_J / (self.c * delta_T)
+        else:
+            self.m = 0
+
+        # 5. 初始化核心状态变量：储存的热量 H_tes (单位: 焦耳)
         self.H_tes_J = self.H_tes_max_J * self.soc
 
         self.energy_history = []

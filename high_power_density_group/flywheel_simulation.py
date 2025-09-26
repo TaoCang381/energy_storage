@@ -19,52 +19,78 @@ class FlywheelModel(BaseStorageModel):
     已按照BaseStorageModel进行接口标准化。
     """
 
+    # 请将此函数完整复制并替换掉 flywheel_simulation.py 中旧的 __init__ 函数
+
     def __init__(self,
-                 id,  # <--- 标准接口参数
-                 dt_s,  # <--- 标准接口参数
+                 id,
+                 dt_s,
                  initial_soc=0.5,
-                 moment_of_inertia_J=1000,
-                 max_angular_vel=1500,
-                 min_angular_vel=300,
-                 rated_power_mw=4.0,  # 额定功率，单位改为MW
-                 rated_torque=2000,
-                 charge_efficiency=0.95,
-                 discharge_efficiency=0.95,
-                 friction_coeff_kf=0.1,
-                 om_cost_per_mwh=20
+                 # --- 核心修改：我们只定义顶层参数，与基准表保持一致 ---
+                 rated_power_mw=5.0,
+                 rated_capacity_mwh=0.25,
+                 charge_efficiency=0.98,
+                 discharge_efficiency=0.98,
+                 om_cost_per_mwh=200,
+
+                 # --- 物理特性参数（可选择性提供，或使用默认值） ---
+                 # 设定一个典型的最高转速，其他物理参数将由此推算
+                 max_angular_vel_rpm=15000,
+                 # 设定一个典型的最低与最高转速比
+                 min_to_max_vel_ratio=0.3
                  ):
 
-        # --- 关键改动 1: 调用父类的构造函数 ---
-        # 它会处理 id, dt_s 的赋值, 并初始化通用的 self.soc 等
+        # 1. 标准接口初始化
         super().__init__(id, dt_s)
 
-        # --- 关键改动 2: 将参数赋值给父类中的标准属性 ---
-        # 这使得所有储能单元的参数都可以通过统一的名称被访问
+        # 2. 将基准参数赋值给父类的标准属性
         self.soc = initial_soc
         self.power_m_w = rated_power_mw
-        # 飞轮的容量是动态的，但为了统一接口，我们基于最大能量差计算一个额定容量
-        self.capacity_mwh = 0.5 * moment_of_inertia_J * (max_angular_vel ** 2 - min_angular_vel ** 2) / (
-            3.6e9)  # 转换为 MWh
-        self.efficiency = np.sqrt(charge_efficiency * discharge_efficiency)  # 取几何平均作为综合效率
-        self.soc_min = 0.1  # 通常飞轮SOC有一定限制
+        self.capacity_mwh = rated_capacity_mwh
+        self.efficiency = np.sqrt(charge_efficiency * discharge_efficiency)
+        self.soc_min = 0.1
         self.soc_max = 0.9
         self.om_cost_per_mwh = om_cost_per_mwh
 
-        # --- 保留飞轮特有的物理参数 ---
-        self.J = moment_of_inertia_J
-        self.omega_max = max_angular_vel
-        self.omega_min = min_angular_vel
-        self.rated_power_w = self.power_m_w * 1e6  # 内部计算仍使用瓦特
-        self.rated_torque_mg = rated_torque
+        # 3. 根据顶层参数，反向推算内部物理参数
+        # 这样做的好处是，我们的模型严格匹配了我们想要的功率和容量
+        self.rated_power_w = self.power_m_w * 1e6
         self.eta_ch = charge_efficiency
         self.eta_dis = discharge_efficiency
-        self.kf = friction_coeff_kf
 
-        # --- 核心状态变量：角速度 omega ---
-        # 根据初始SOC计算初始角速度
+        # 将转速从 RPM (转/分钟) 转换为 rad/s
+        self.omega_max = max_angular_vel_rpm * (2 * math.pi) / 60
+        self.omega_min = self.omega_max * min_to_max_vel_ratio
+
+        # 核心推算：根据能量公式 E = 0.5 * J * (w_max^2 - w_min^2)，反算转动惯量 J
+        # E的单位是焦耳, 1 MWh = 3.6e9 J
+        energy_joules = self.capacity_mwh * 3.6e9
+        omega_range_sq = self.omega_max ** 2 - self.omega_min ** 2
+        if omega_range_sq <= 1e-6:
+            self.J = 0
+        else:
+            self.J = 2 * energy_joules / omega_range_sq
+
+        # 核心推算：根据功率公式 P = T * w, 反算额定扭矩 T
+        # 额定扭矩必须足以在最低转速下也能提供额定功率
+        if self.omega_min > 1e-3:
+            self.rated_torque_mg = self.rated_power_w / self.omega_min
+        else:
+            self.rated_torque_mg = 0
+
+        # 设定一个合理的待机损耗，例如占额定功率的0.1%
+        # 损耗转矩 T_loss = kf * w, 损耗功率 P_loss = kf * w^2
+        # 假设在平均转速下，损耗为额定功率的0.1%
+        avg_omega = (self.omega_max + self.omega_min) / 2
+        power_loss_w = self.rated_power_w * 0.001
+        if avg_omega ** 2 > 1e-3:
+            self.kf = power_loss_w / (avg_omega ** 2)
+        else:
+            self.kf = 0
+
+        # 4. 初始化状态变量
+        # 根据初始SOC和新的速度范围，精确计算初始角速度
         self.omega = math.sqrt(self.soc * (self.omega_max ** 2 - self.omega_min ** 2) + self.omega_min ** 2)
 
-        # 飞轮特有的历史记录
         self.angular_vel_history = []
         self.state = 'idle'
 

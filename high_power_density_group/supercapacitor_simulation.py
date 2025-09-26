@@ -22,44 +22,78 @@ class Supercapacitor(BaseStorageModel):
     """
 
     def __init__(self,
-                 id,  # <--- 标准接口参数
-                 dt_s,  # <--- 标准接口参数
+                 id,
+                 dt_s,
                  initial_soc=0.5,
-                 capacitance_F=120000,
-                 max_voltage=48,
-                 min_voltage=24,
-                 esr_ohm=0.005,
-                 rated_power_mw=0.05,  # 额定功率, 50kW = 0.05MW
-                 rated_current=1000,
-                 self_discharge_rate_sigma=1e-7,
-                 om_cost_per_mwh=80  # 元/MWh
+                 # --- 核心修改：我们只定义顶层参数，与基准表保持一致 ---
+                 rated_power_mw=10.0,
+                 rated_capacity_mwh=0.1,
+                 charge_efficiency=0.99,
+                 discharge_efficiency=0.99,
+                 om_cost_per_mwh=250,
+
+                 # --- 物理特性参数（可选择性提供，或使用默认值）---
+                 # 设定一个典型的最高工作电压
+                 max_voltage=500,
+                 # 设定一个典型的最低与最高电压比
+                 min_to_max_voltage_ratio=0.5
                  ):
 
-        # --- 关键改动 3: 调用父类的构造函数 ---
+        # 1. 标准接口初始化
         super().__init__(id, dt_s)
 
-        # --- 关键改动 4: 将参数赋值给父类中的标准属性 ---
+        # 2. 将基准参数赋值给父类的标准属性
         self.soc = initial_soc
         self.power_m_w = rated_power_mw
-        # 超级电容器的额定容量 MWh = 0.5 * C * (Vmax^2 - Vmin^2) / 3.6e9
-        self.capacity_mwh = 0.5 * capacitance_F * (max_voltage ** 2 - min_voltage ** 2) / (3.6e9)
-        self.efficiency = 0.98  # 超级电容器效率很高，这里给一个典型值
-        self.soc_min = 0.05  # 通常有电压下限保护
+        self.capacity_mwh = rated_capacity_mwh
+        # 对于超级电容，其充放电库仑效率接近1，总效率主要受ESR损耗影响
+        # P_loss = I^2 * R. P_out = V*I - I^2*R. eta = P_out / (V*I) = 1 - I*R/V
+        # 这是一个动态值，我们这里用一个较高的典型值
+        self.efficiency = np.sqrt(charge_efficiency * discharge_efficiency)
+        self.soc_min = 0.05
         self.soc_max = 0.95
         self.om_cost_per_mwh = om_cost_per_mwh
 
-        # --- 保留超级电容器特有的物理参数 ---
-        self.C_sc = capacitance_F
+        # 3. 根据顶层参数，反向推算内部物理参数
+        self.rated_power_w = self.power_m_w * 1e6
         self.V_max = max_voltage
-        self.V_min = min_voltage
-        self.R_esr = esr_ohm
-        self.rated_power_w = self.power_m_w * 1e6  # 内部计算仍使用瓦特
-        self.rated_current_sc = rated_current
-        self.sigma = self_discharge_rate_sigma
+        self.V_min = self.V_max * min_to_max_voltage_ratio
 
-        # --- 核心状态变量：电压 V_sc ---
-        v_range_sq = self.V_max ** 2 - self.V_min ** 2
-        self.V_sc = math.sqrt(self.soc * v_range_sq + self.V_min ** 2)
+        # 核心推算：根据能量公式 E = 0.5 * C * (V_max^2 - V_min^2)，反算电容值 C
+        # E的单位是焦耳, 1 MWh = 3.6e9 J
+        energy_joules = self.capacity_mwh * 3.6e9
+        voltage_range_sq = self.V_max ** 2 - self.V_min ** 2
+        if voltage_range_sq <= 1e-6:
+            self.C_sc = 0
+        else:
+            self.C_sc = 2 * energy_joules / voltage_range_sq
+
+        # 核心推算：根据功率损耗 P_loss = (P_rated/V)^2 * R_esr 来估算ESR
+        # 假设在额定功率、平均电压下，损耗为 (1 - 效率) * P_rated
+        avg_voltage = (self.V_max + self.V_min) / 2
+        power_loss_w = self.rated_power_w * (1 - self.efficiency)
+        if avg_voltage > 1e-3:
+            # P_loss = I^2 * R = (P_rated/V_avg)^2 * R
+            self.R_esr = power_loss_w * (avg_voltage / self.rated_power_w) ** 2
+        else:
+            self.R_esr = 0.01  # 给一个默认的小值
+
+        # 核心推算：根据 P = I * V 反算额定电流
+        # 额定电流应足以在最低电压下也能提供额定功率
+        if self.V_min > 1e-3:
+            self.rated_current_sc = self.rated_power_w / self.V_min
+        else:
+            self.rated_current_sc = 0
+
+        # 设定一个合理的自放电率，例如每天损失5%的能量
+        # 简化模型 V(t) ~= V(0) * (1 - sigma*t)
+        # 假设一天后电压下降5%， t = 86400s
+        daily_loss_ratio = 0.05
+        self.sigma = daily_loss_ratio / 86400
+
+        # 4. 初始化状态变量
+        # 根据初始SOC和新的电压范围，精确计算初始电压
+        self.V_sc = math.sqrt(self.soc * (self.V_max ** 2 - self.V_min ** 2) + self.V_min ** 2)
 
         self.voltage_history = []
         self.state = 'idle'

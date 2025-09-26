@@ -22,44 +22,59 @@ class SuperconductingMagneticEnergyStorage(BaseStorageModel):
     """
 
     def __init__(self,
-                 id,  # <--- 标准接口参数
-                 dt_s,  # <--- 标准接口参数
+                 id,
+                 dt_s,
                  initial_soc=0.5,
-                 inductance_H=2.5,
-                 max_current_A=2000.0,
-                 min_current_A=200.0,
-                 pcs_rated_power_mw=5.0,  # 额定功率, 5MW
-                 pcs_efficiency=0.97,
-                 cryogenic_power_kw=50,  # 低温系统维持功率 (kW)
-                 pcs_max_voltage_v=3000,
-                 om_cost_per_mwh=20  # 元/MWh
+                 # --- 核心修改：我们只定义顶层参数，与基准表保持一致 ---
+                 rated_power_mw=8.0,
+                 rated_capacity_mwh=0.15,
+                 # SMES的PCS效率非常高
+                 pcs_efficiency=0.98,
+                 om_cost_per_mwh=300,
+
+                 # --- 物理特性参数（可选择性提供，或使用默认值）---
+                 # 设定一个典型的最大工作电流
+                 max_current_A=2500.0,
+                 # 设定一个典型的最低与最高电流比
+                 min_to_max_current_ratio=0.1
                  ):
 
-        # --- 关键改动 3: 调用父类的构造函数 ---
+        # 1. 标准接口初始化
         super().__init__(id, dt_s)
 
-        # --- 关键改动 4: 将参数赋值给父类中的标准属性 ---
+        # 2. 将基准参数赋值给父类的标准属性
         self.soc = initial_soc
-        self.power_m_w = pcs_rated_power_mw
-        # SMES额定容量 MWh = 0.5 * L * (I_max^2 - I_min^2) / 3.6e9
-        self.capacity_mwh = 0.5 * inductance_H * (max_current_A ** 2 - min_current_A ** 2) / (3.6e9)
+        self.power_m_w = rated_power_mw
+        self.capacity_mwh = rated_capacity_mwh
         self.efficiency = pcs_efficiency  # PCS效率作为综合效率
         self.soc_min = 0.05
         self.soc_max = 0.95
         self.om_cost_per_mwh = om_cost_per_mwh
 
-        # --- 保留SMES特有的物理参数 ---
-        self.L_smes = inductance_H
-        self.I_max = max_current_A
-        self.I_min = min_current_A
-        self.rated_power_w = self.power_m_w * 1e6  # 内部计算仍使用瓦特
+        # 3. 根据顶层参数，反向推算内部物理参数
+        self.rated_power_w = self.power_m_w * 1e6
         self.eta_pcs = pcs_efficiency
-        self.P_cryo_w = cryogenic_power_kw * 1e3  # 内部计算使用瓦特
-        self.V_pcs_max = pcs_max_voltage_v
+        self.I_max = max_current_A
+        self.I_min = self.I_max * min_to_max_current_ratio
 
-        # --- 核心状态变量：线圈电流 I_smes ---
-        i_range_sq = self.I_max ** 2 - self.I_min ** 2
-        self.I_smes = math.sqrt(self.soc * i_range_sq + self.I_min ** 2)
+        # 核心推算：根据能量公式 E = 0.5 * L * (I_max^2 - I_min^2)，反算电感L
+        # E的单位是焦耳, 1 MWh = 3.6e9 J
+        energy_joules = self.capacity_mwh * 3.6e9
+        current_range_sq = self.I_max ** 2 - self.I_min ** 2
+        if current_range_sq <= 1e-6:
+            self.L_smes = 0
+        else:
+            self.L_smes = 2 * energy_joules / current_range_sq
+
+        # 核心推算：制冷功率通常是额定功率的一个很小的比例，例如0.5%
+        self.P_cryo_w = self.rated_power_w * 0.005
+
+        # 设定一个典型的PCS最大电压
+        self.V_pcs_max = 3000
+
+        # 4. 初始化状态变量
+        # 根据初始SOC和新的电流范围，精确计算初始电流
+        self.I_smes = math.sqrt(self.soc * (self.I_max ** 2 - self.I_min ** 2) + self.I_min ** 2)
 
         self.current_history = []
         self.state = 'idle'

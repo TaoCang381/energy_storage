@@ -26,44 +26,58 @@ class PumpedHydroStorage(BaseStorageModel):
     """
 
     def __init__(self,
-                 id,  # <--- 标准接口参数
-                 dt_s,  # <--- 标准接口参数
+                 id,
+                 dt_s,
                  initial_soc=0.5,
-                 upper_reservoir_volume_m3=1.835e7,
-                 effective_head_m=400,
-                 turbine_rated_power_mw=300.0,  # 额定功率, 单位 MW
-                 pump_rated_power_mw=300.0,  # 额定功率, 单位 MW
-                 turbine_efficiency=0.9,
-                 pump_efficiency=0.9,
-                 soc_upper_limit=0.98,
-                 soc_lower_limit=0.02,
-                 om_cost_per_mwh=5  # 元/MWh
+                 # --- 核心修改：我们只定义顶层参数，与基准表保持一致 ---
+                 rated_power_mw=100.0,
+                 rated_capacity_mwh=800.0,
+                 turbine_efficiency=0.92,  # 发电效率
+                 pump_efficiency=0.90,  # 抽水效率
+                 om_cost_per_mwh=10,
+
+                 # --- 其他关键参数 ---
+                 soc_upper_limit=0.95,
+                 soc_lower_limit=0.1,
+                 # 设定一个典型的有效水头高度
+                 effective_head_m=400
                  ):
 
-        # --- 关键改动 3: 调用父类的构造函数 ---
+        # 1. 标准接口初始化
         super().__init__(id, dt_s)
 
-        # --- 关键改动 4: 将参数赋值给父类中的标准属性 ---
+        # 2. 将基准参数赋值给父类的标准属性
         self.soc = initial_soc
-        self.power_m_w = turbine_rated_power_mw  # 以发电功率作为额定功率
-        # 额定容量 MWh = V * rho * g * h / 3.6e9
-        self.capacity_mwh = upper_reservoir_volume_m3 * WATER_DENSITY_KG_M3 * GRAVITY_G * effective_head_m / 3.6e9
+        self.power_m_w = rated_power_mw  # 以发电功率作为额定功率
+        self.capacity_mwh = rated_capacity_mwh
         self.efficiency = np.sqrt(turbine_efficiency * pump_efficiency)
         self.soc_min = soc_lower_limit
         self.soc_max = soc_upper_limit
         self.om_cost_per_mwh = om_cost_per_mwh
 
-        # --- 保留PHS特有的物理参数 ---
-        self.V_ur_max = upper_reservoir_volume_m3
-        self.V_ur_min = self.V_ur_max * self.soc_min
-        self.h_eff = effective_head_m
-        self.P_gen_rated_w = self.power_m_w * 1e6  # 内部计算仍使用瓦特
-        self.P_pump_rated_w = pump_rated_power_mw * 1e6
+        # 3. 根据顶层参数，反向推算内部物理参数
         self.eta_gen = turbine_efficiency
         self.eta_pump = pump_efficiency
+        self.h_eff = effective_head_m
+        self.P_gen_rated_w = self.power_m_w * 1e6
+        # 假设抽水功率与发电功率相同
+        self.P_pump_rated_w = self.power_m_w * 1e6
 
-        # --- 核心状态变量：上水库水量 V_ur ---
-        # 基于可用水量范围计算当前水量
+        # 核心推算：根据能量公式 E = V * rho * g * h, 反算上水库的总可用容积
+        # E的单位是焦耳, 1 MWh = 3.6e9 J
+        energy_joules = self.capacity_mwh * 3.6e9
+        denominator = WATER_DENSITY_KG_M3 * GRAVITY_G * self.h_eff
+        if denominator > 1e-6:
+            # 这是水库在SOC_min和SOC_max之间的有效容积
+            usable_volume_m3 = energy_joules / denominator
+            # 从可用容积反推总容积
+            self.V_ur_max = usable_volume_m3 / (self.soc_max - self.soc_min)
+        else:
+            self.V_ur_max = 0
+
+        self.V_ur_min = self.V_ur_max * self.soc_min
+
+        # 4. 初始化核心状态变量：上水库水量 V_ur
         self.V_ur_m3 = self.V_ur_min + self.soc * (self.V_ur_max - self.V_ur_min)
 
         self.volume_history = []

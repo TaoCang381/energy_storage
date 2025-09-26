@@ -22,41 +22,46 @@ class DiabaticCAES(BaseStorageModel):
     """
 
     def __init__(self,
-                 id,  # <--- 标准接口参数
-                 dt_s,  # <--- 标准接口参数
+                 id,
+                 dt_s,
                  initial_soc=0.5,
-                 cavern_max_air_mass_kg=5e8,
-                 compressor_rated_power_mw=200.0,
-                 charge_rate_kg_per_kwh=0.2,
-                 turbine_rated_power_mw=300.0,
-                 heat_rate_kj_per_kwh=5000,
-                 air_usage_rate_kg_per_kwh=1.0,
+                 # --- 核心修改：我们只定义顶层参数，与基准表保持一致 ---
+                 compressor_rated_power_mw=80.0,  # 充电（压缩）功率
+                 turbine_rated_power_mw=80.0,  # 放电（发电）功率
+                 rated_capacity_mwh=640.0,  # 额定等效输出电容量
+
+                 # 效率与成本参数
+                 charge_rate_kg_per_kwh=7.2,  # 典型值：每kWh电能可以压缩多少kg空气
+                 air_usage_rate_kg_per_kwh=4.0,  # 典型值：每发一度电需要消耗多少kg空气
+                 heat_rate_kj_per_kwh=4500,  # 典型值：补燃式热耗率 (kJ_fuel / kWh_elec)
+                 om_cost_per_mwh=40,  # 电力部分运维成本
+                 cost_per_kwh_fuel=0.3,  # 燃料成本 (元/kWh_fuel)
+
+                 # --- 其他关键参数 ---
                  soc_upper_limit=0.98,
-                 soc_lower_limit=0.2,
-                 om_cost_per_mwh=15,  # 元/MWh, 仅考虑电力部分的运维成本
-                 cost_per_kwh_fuel=0.3
+                 soc_lower_limit=0.2
                  ):
 
-        # --- 关键改动 3: 调用父类的构造函数 ---
+        # 1. 标准接口初始化
         super().__init__(id, dt_s)
-        self.soh = 1.0  # CAES SOH基本不变
 
-        # --- 关键改动 4: 将参数赋值给父类中的标准属性 ---
+        # 2. 将基准参数赋值给父类的标准属性
         self.soc = initial_soc
-        self.power_m_w = turbine_rated_power_mw  # 以发电机功率作为额定功率
-        # 计算等效电容量 MWh = (最大空气质量 / 耗气率) / 1000
-        self.capacity_mwh = (cavern_max_air_mass_kg / air_usage_rate_kg_per_kwh) / 1000
-        # 计算电-电往返效率 (不考虑燃料)
-        if air_usage_rate_kg_per_kwh > 0:
-            self.efficiency = charge_rate_kg_per_kwh / air_usage_rate_kg_per_kwh
-        else:
-            self.efficiency = 0
+        self.power_m_w = turbine_rated_power_mw
+        self.capacity_mwh = rated_capacity_mwh
         self.soc_min = soc_lower_limit
         self.soc_max = soc_upper_limit
         self.om_cost_per_mwh = om_cost_per_mwh
+        self.soh = 1.0  # CAES SOH基本不变
 
-        # --- 保留CAES特有的物理参数 ---
-        self.M_air_max = cavern_max_air_mass_kg
+        # 核心计算：电-电往返效率 (不考虑燃料输入，仅看空气媒介)
+        # 1 kWh电能 -> x kg 空气 -> y kWh电能. 效率 = y/1 = x_kg / (y_kwh * air_usage_rate) = charge_rate / air_usage_rate
+        if air_usage_rate_kg_per_kwh > 1e-6:
+            self.efficiency = charge_rate_kg_per_kwh / air_usage_rate_kg_per_kwh
+        else:
+            self.efficiency = 0
+
+        # 3. 保留CAES特有的物理参数
         self.P_comp_rated_w = compressor_rated_power_mw * 1e6
         self.eta_charge_rate = charge_rate_kg_per_kwh
         self.P_gen_rated_w = self.power_m_w * 1e6
@@ -64,7 +69,13 @@ class DiabaticCAES(BaseStorageModel):
         self.eta_air_usage = air_usage_rate_kg_per_kwh
         self.cost_per_kwh_fuel = cost_per_kwh_fuel
 
-        # --- 核心状态变量：储气室空气质量 M_air ---
+        # 4. 根据顶层参数，反向推算内部物理参数
+        # 核心推算：根据额定输出电容量，反算储气室的最大空气质量
+        # Max Air Mass (kg) = Rated Capacity (kWh) * Air Usage Rate (kg/kWh)
+        # rated_capacity_mwh * 1000 -> kWh
+        self.M_air_max = self.capacity_mwh * 1000 * self.eta_air_usage
+
+        # 5. 初始化核心状态变量：储气室空气质量 M_air (kg)
         self.M_air_kg = self.M_air_max * self.soc
 
         self.mass_history = []
